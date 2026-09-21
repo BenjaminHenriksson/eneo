@@ -60,6 +60,7 @@ class _SupportsToolCallMetadata(Protocol):
     tool_call_id: str | None
     approved: bool | None
     result_status: str | None
+    result: str | None
 
 
 def _require_approval_id(chunk: Completion) -> str:
@@ -197,6 +198,7 @@ def to_sse_response(chunk: Completion, session_id: "UUID") -> ServerSentEvent:
                     tool_call_id=tc.tool_call_id,
                     approved=tc.approved,
                     result_status=tc.result_status,
+                    result=tc.result,
                 )
                 for tc in tool_calls
             ],

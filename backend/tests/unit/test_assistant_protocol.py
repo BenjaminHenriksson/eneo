@@ -65,3 +65,23 @@ def test_tool_approval_sse_requires_real_approval_id():
             ),
             uuid4(),
         )
+
+
+def test_completed_tool_result_reaches_live_client_unchanged():
+    result = json.dumps({
+        "view_id": "v_123",
+        "url": "https://geodata.example/v/v_123?signature=a%2Fb&version=1",
+    })
+    event = to_sse_response(
+        Completion(
+            response_type=ResponseType.TOOL_CALL,
+            tool_calls_metadata=[ToolCallMetadata(
+                server_name="Geodata MCP", tool_name="map", tool_call_id="call_1",
+                approved=True, result_status="succeeded", result=result,
+            )],
+        ),
+        uuid4(),
+    )
+    tool = json.loads(event.data)["tools"][0]
+    assert tool["result_status"] == "succeeded"
+    assert tool["result"] == result
