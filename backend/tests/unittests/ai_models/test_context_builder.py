@@ -127,12 +127,14 @@ def test_context_with_messages(context_builder: ContextBuilder):
                 answer="Answer 1",
                 files=[],
                 tool_calls=None,
+                provider_history=None,
             ),
             MagicMock(
                 question="Question 2 with file",
                 answer="Answer 2",
                 files=[file],
                 tool_calls=None,
+                provider_history=None,
             ),
         ]
     )
@@ -192,12 +194,14 @@ def test_context_with_messages_and_images(context_builder: ContextBuilder):
                 answer="Answer 1",
                 files=[],
                 tool_calls=None,
+                provider_history=None,
             ),
             MagicMock(
                 question="Question 2 with image",
                 answer="Answer 2",
                 files=[image],
                 tool_calls=None,
+                provider_history=None,
             ),
         ]
     )
@@ -238,6 +242,7 @@ def _question_mock(question: str, answer: str, tool_calls=None) -> MagicMock:
         files=[],
         generated_files=[],
         tool_calls=tool_calls,
+        provider_history=None,
     )
 
 
@@ -473,3 +478,27 @@ def test_truncate_knowledge_if_too_many_chunks(context_builder: ContextBuilder):
     )
 
     assert context.token_count < 10000
+
+
+def test_provider_reasoning_counts_toward_context_budget(context_builder):
+    turn = _question_mock("Q", "A")
+    session = MagicMock(questions=[turn])
+    _, plain_tokens = context_builder._build_messages(session, max_tokens=10000)
+    history = {
+        "model": "openrouter/thinkingmachines/inkling",
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "A",
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "reason " * 500, "index": 0}
+                ],
+            }
+        ],
+    }
+    turn.provider_history = history
+    messages, reasoning_tokens = context_builder._build_messages(
+        session, max_tokens=10000
+    )
+    assert reasoning_tokens > plain_tokens + 400
+    assert messages[0].provider_history == history

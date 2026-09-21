@@ -58,6 +58,7 @@ dependencies = [
     "opentelemetry-instrumentation-redis>=0.41b0",
     "opentelemetry-instrumentation-httpx>=0.41b0",
     "opentelemetry-instrumentation-aiohttp-client>=0.41b0",
+    "openai>=2.24.0,<3",
 ]
 
 [project.scripts]
