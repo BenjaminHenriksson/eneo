@@ -85,6 +85,8 @@ class ToolCallInfo(BaseModel):
 class QuestionAdd(QuestionBase):
     num_tokens_question: int
     num_tokens_answer: int
+    context_tokens_question: Optional[int] = None
+    context_tokens_answer: Optional[int] = None
     tenant_id: UUID
     completion_model_id: Optional[UUID] = None
     session_id: Optional[UUID] = None
@@ -147,6 +149,9 @@ class Message(QuestionBase, InDB):
     # context usage. Fix requires a backfill migration, out of scope here.
     num_tokens_question: int = 0
     num_tokens_answer: int = 0
+    # Latest model request; null means unavailable on historical tool turns.
+    context_tokens_question: Optional[int] = None
+    context_tokens_answer: Optional[int] = None
 
     @field_validator("tool_calls", mode="before")
     @classmethod

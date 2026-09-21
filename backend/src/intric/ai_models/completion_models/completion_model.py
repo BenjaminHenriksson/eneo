@@ -33,6 +33,10 @@ class TokenUsage(BaseModel):
     prompt_tokens: Optional[int] = None
     completion_tokens: Optional[int] = None
     reasoning_tokens: Optional[int] = None
+    # Latest provider request only, unlike the cumulative usage above. Tool
+    # rounds resend history; summing their prompts does not measure context.
+    context_prompt_tokens: Optional[int] = None
+    context_completion_tokens: Optional[int] = None
 
 
 class ResponseType(str, Enum):

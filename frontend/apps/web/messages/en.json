@@ -258,6 +258,7 @@
   "context_size": "Context size",
   "context_limit_exceeded": "You've exceeded the context limit. The AI may not see the oldest messages or file content.",
   "context_window_exceeded": "Your input is too large for this model. Try a shorter message, fewer attachments, or a model with a larger context window.",
+  "context_usage_unavailable": "Context usage unavailable for this turn. It will update after the next response.",
   "context_usage": "Context usage",
   "context_usage_detail": "{used} of {limit} tokens used ({percent}%) — based on the last response. Next message starts from here.",
   "context_usage_projection": "{history} + {pending} pending = {limit} ({percent}%). The pending segment is the exact cost your next message will add. Knowledge and web search add extra tokens not shown here.",

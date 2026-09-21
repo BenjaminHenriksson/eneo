@@ -140,6 +140,8 @@ class QuestionRepository:
         answer: str,
         num_tokens_question: int | None = None,
         num_tokens_answer: int | None = None,
+        context_tokens_question: int | None = None,
+        context_tokens_answer: int | None = None,
         completion_model_id: UUID | None = None,
         tool_calls: list["ToolCallInfo"] | None = None,
         info_blob_chunks: list[InfoBlobChunkInDBWithScore] | None = None,
@@ -171,6 +173,10 @@ class QuestionRepository:
             update_values["num_tokens_question"] = num_tokens_question
         if num_tokens_answer is not None:
             update_values["num_tokens_answer"] = num_tokens_answer
+        if context_tokens_question is not None:
+            update_values["context_tokens_question"] = context_tokens_question
+        if context_tokens_answer is not None:
+            update_values["context_tokens_answer"] = context_tokens_answer
         if completion_model_id is not None:
             update_values["completion_model_id"] = completion_model_id
         if tool_calls is not None:

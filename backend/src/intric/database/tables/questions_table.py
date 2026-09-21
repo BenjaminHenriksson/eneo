@@ -25,6 +25,8 @@ class Questions(BasePublic):
     answer: Mapped[str] = mapped_column()
     num_tokens_question: Mapped[int] = mapped_column()
     num_tokens_answer: Mapped[int] = mapped_column()
+    context_tokens_question: Mapped[Optional[int]] = mapped_column(nullable=True)
+    context_tokens_answer: Mapped[Optional[int]] = mapped_column(nullable=True)
     tool_calls: Mapped[Optional[list[object]]] = mapped_column(JSONB, nullable=True)
 
     # Foreign keys

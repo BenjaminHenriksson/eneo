@@ -152,6 +152,8 @@ class TokenUsageEvent(BaseModel):
     prompt_tokens: int
     completion_tokens: int
     turn_tokens: int
+    context_prompt_tokens: Optional[int] = None
+    context_completion_tokens: Optional[int] = None
 
 
 class SSETokenUsage(SSEBase):

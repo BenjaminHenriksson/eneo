@@ -112,6 +112,77 @@ async def _collect(adapter: TenantModelAdapter, stream, **kwargs):
     return output
 
 
+def _usage_chunk(prompt, completion):
+    return SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=completion),
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_rounds_keep_latest_context_and_cumulative_usage_separate():
+    adapter = _make_adapter()
+    proxy = _FakeMCPProxy()
+    stream = _AsyncChunkStream(
+        [_tool_call_chunk(), _usage_chunk(30000, 100)],
+        eneo_context={
+            "mcp_proxy": proxy,
+            "messages": [],
+            "kwargs": {},
+            "has_tools": True,
+        },
+    )
+    followups = [
+        _AsyncChunkStream(
+            [_tool_call_chunk(tool_call_id="call_2"), _usage_chunk(31000, 200)]
+        ),
+        _AsyncChunkStream([_text_chunk("done", "stop"), _usage_chunk(32000, 500)]),
+    ]
+    with patch(
+        "intric.completion_models.infrastructure.adapters.tenant_model_adapter._acompletion_call",
+        AsyncMock(side_effect=followups),
+    ):
+        output = await _collect(adapter, stream, require_tool_approval=False)
+    assert len(proxy.calls) == 2
+    usage = output[-1].usage
+    assert usage.prompt_tokens == 93000
+    assert usage.completion_tokens == 800
+    assert usage.context_prompt_tokens == 32000
+    assert usage.context_completion_tokens == 500
+
+
+@pytest.mark.asyncio
+async def test_missing_final_usage_does_not_reuse_previous_context():
+    adapter = _make_adapter()
+    stream = _AsyncChunkStream(
+        [_tool_call_chunk(), _usage_chunk(30000, 100)],
+        eneo_context={
+            "mcp_proxy": _FakeMCPProxy(),
+            "messages": [],
+            "kwargs": {},
+            "has_tools": True,
+        },
+    )
+    with patch(
+        "intric.completion_models.infrastructure.adapters.tenant_model_adapter._acompletion_call",
+        AsyncMock(return_value=_AsyncChunkStream([_text_chunk("done", "stop")])),
+    ):
+        output = await _collect(adapter, stream, require_tool_approval=False)
+    assert output[-1].usage.prompt_tokens == 30000
+    assert output[-1].usage.context_prompt_tokens is None
+    assert output[-1].usage.context_completion_tokens is None
+
+
+def test_non_streaming_accumulation_preserves_last_request_context():
+    adapter = _make_adapter()
+    usage = adapter._extract_usage(_usage_chunk(30000, 100))
+    usage = adapter._accumulate_usage(usage, _usage_chunk(32000, 500))
+    assert usage.prompt_tokens == 62000
+    assert usage.completion_tokens == 600
+    assert usage.context_prompt_tokens == 32000
+    assert usage.context_completion_tokens == 500
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method_name", "phase"),

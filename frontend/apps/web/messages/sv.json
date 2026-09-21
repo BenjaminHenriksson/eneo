@@ -318,6 +318,7 @@
   "confirm_logout": "Är du säker på att du vill logga ut?",
   "connect": "Anslut",
   "context_size": "Kontextstorlek",
+  "context_usage_unavailable": "Kontextanvändning saknas för denna tur. Den uppdateras efter nästa svar.",
   "context_usage": "Kontextanvändning",
   "context_usage_detail": "{used} av {limit} tokens använda ({percent}%) — baserat på senaste svaret. Nästa meddelande startar härifrån.",
   "context_usage_projection": "{history} + {pending} väntande = {limit} ({percent}%). Det väntande segmentet är exakt vad nästa meddelande lägger till. Kunskap och webbsök tillkommer utöver detta.",

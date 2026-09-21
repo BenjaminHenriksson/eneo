@@ -1007,6 +1007,12 @@ class AssistantService:
                         answer=response_string,
                         num_tokens_question=num_tokens_question,
                         num_tokens_answer=num_tokens_answer,
+                        context_tokens_question=stream_usage.context_prompt_tokens
+                        if stream_usage
+                        else None,
+                        context_tokens_answer=stream_usage.context_completion_tokens
+                        if stream_usage
+                        else None,
                         completion_model=cast("AICompletionModel", completion_model),
                         info_blob_chunks=reference_chunks,
                         generated_files=generated_files,
@@ -1024,6 +1030,12 @@ class AssistantService:
                         usage=TokenUsage(
                             prompt_tokens=num_tokens_question,
                             completion_tokens=num_tokens_answer,
+                            context_prompt_tokens=stream_usage.context_prompt_tokens
+                            if stream_usage
+                            else None,
+                            context_completion_tokens=stream_usage.context_completion_tokens
+                            if stream_usage
+                            else None,
                         ),
                     )
                 finally:
@@ -1119,6 +1131,12 @@ class AssistantService:
                 answer=final_answer,
                 num_tokens_question=num_tokens_question,
                 num_tokens_answer=num_tokens_answer,
+                context_tokens_question=response.usage.context_prompt_tokens
+                if response.usage
+                else None,
+                context_tokens_answer=response.usage.context_completion_tokens
+                if response.usage
+                else None,
                 generated_files=generated_files,
                 completion_model=cast("AICompletionModel", completion_model),
                 info_blob_chunks=reference_chunks,

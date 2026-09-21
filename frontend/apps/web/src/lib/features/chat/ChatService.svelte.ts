@@ -1,4 +1,5 @@
 import { browser } from "$app/environment";
+import { getContextSnapshot, type ContextTokenUsage } from "./contextUsage";
 import { PAGINATION } from "$lib/core/constants";
 import { toastError } from "$lib/core/errors";
 import { createAsyncState } from "$lib/core/helpers/createAsyncState.svelte";
@@ -52,6 +53,7 @@ export class ChatService {
   // from the last persisted message on conversation load.
   lockedInputTokens = $state<number>(0);
   lockedOutputTokens = $state<number>(0);
+  contextUsageKnown = $state<boolean>(true);
   contextTokens = $derived(this.lockedInputTokens + this.lockedOutputTokens);
 
   // Cumulative tokens billed over the entire conversation. Each turn re-sends
@@ -171,19 +173,20 @@ export class ChatService {
       this.#resetLocked();
       return;
     }
-    // Caveat: messages persisted before token measurement was added report
-    // 0 here (backend stores NOT NULL int, no way to distinguish 0 from
-    // "unmeasured"). Loading an old conversation will underreport actual
-    // context fill — fixed when the user sends their next message and we
-    // receive a fresh token_usage SSE event.
-    const last = messages[messages.length - 1];
-    this.lockedInputTokens = last.num_tokens_question ?? 0;
-    this.lockedOutputTokens = last.num_tokens_answer ?? 0;
+    this.#setContextSnapshot(messages[messages.length - 1]);
+  }
+
+  #setContextSnapshot(message: Parameters<typeof getContextSnapshot>[0]) {
+    const snapshot = getContextSnapshot(message);
+    this.contextUsageKnown = snapshot !== null;
+    this.lockedInputTokens = snapshot?.input ?? 0;
+    this.lockedOutputTokens = snapshot?.output ?? 0;
   }
 
   #resetLocked() {
     this.lockedInputTokens = 0;
     this.lockedOutputTokens = 0;
+    this.contextUsageKnown = true;
   }
 
   #clearPreflight() {
@@ -495,16 +498,17 @@ export class ChatService {
                 // expose the running context fill for the UI bar.
                 const usage = (
                   event as unknown as {
-                    usage?: { prompt_tokens: number; completion_tokens: number };
+                    usage?: ContextTokenUsage;
                   }
                 ).usage;
                 if (!usage) return;
                 if (ref) {
                   ref.num_tokens_question = usage.prompt_tokens;
                   ref.num_tokens_answer = usage.completion_tokens;
+                  ref.context_tokens_question = usage.context_prompt_tokens;
+                  ref.context_tokens_answer = usage.context_completion_tokens;
+                  this.#setContextSnapshot(ref);
                 }
-                this.lockedInputTokens = usage.prompt_tokens;
-                this.lockedOutputTokens = usage.completion_tokens;
               }
             },
             onToolCall: (event) => {

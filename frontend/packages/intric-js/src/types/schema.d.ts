@@ -12191,6 +12191,9 @@ export interface components {
        * @default 0
        */
       num_tokens_answer?: number;
+      /** Latest provider request only; null when historical context is unknown. */
+      context_tokens_question?: number | null;
+      context_tokens_answer?: number | null;
     };
     /** MessageLogging */
     MessageLogging: {
@@ -12229,6 +12232,9 @@ export interface components {
        * @default 0
        */
       num_tokens_answer?: number;
+      /** Latest provider request only; null when historical context is unknown. */
+      context_tokens_question?: number | null;
+      context_tokens_answer?: number | null;
       logging_details: components["schemas"]["LoggingDetailsPublic"];
     };
     /** MetadataCount */

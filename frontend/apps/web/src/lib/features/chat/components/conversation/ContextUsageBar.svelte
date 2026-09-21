@@ -130,7 +130,9 @@
     return "";
   });
 
-  const hasUsage = $derived(chat.contextLimit > 0 && (chat.contextTokens > 0 || pendingTotal > 0));
+  const hasUsage = $derived(
+    chat.contextUsageKnown && chat.contextLimit > 0 && (chat.contextTokens > 0 || pendingTotal > 0)
+  );
   const showBar = $derived(hasUsage && isVisible);
   const showRevealButton = $derived(hasUsage && !isVisible);
 
@@ -147,6 +149,10 @@
         })
   );
 </script>
+
+{#if !chat.contextUsageKnown}
+  <p class="text-secondary text-xs" role="status">{m.context_usage_unavailable()}</p>
+{/if}
 
 {#if showRevealButton}
   <div class="flex w-full justify-end px-1 pt-1">

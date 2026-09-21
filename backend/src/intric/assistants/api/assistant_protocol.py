@@ -251,6 +251,12 @@ def to_sse_response(chunk: Completion, session_id: "UUID") -> ServerSentEvent:
                 prompt_tokens=prompt,
                 completion_tokens=completion,
                 turn_tokens=prompt + completion,
+                context_prompt_tokens=chunk.usage.context_prompt_tokens
+                if chunk.usage
+                else None,
+                context_completion_tokens=chunk.usage.context_completion_tokens
+                if chunk.usage
+                else None,
             ),
         )
 

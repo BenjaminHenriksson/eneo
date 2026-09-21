@@ -379,6 +379,8 @@ class TenantModelAdapter(CompletionModelAdapter):
             prompt_tokens=getattr(usage, "prompt_tokens", None),
             completion_tokens=getattr(usage, "completion_tokens", None),
             reasoning_tokens=reasoning_tokens,
+            context_prompt_tokens=getattr(usage, "prompt_tokens", None),
+            context_completion_tokens=getattr(usage, "completion_tokens", None),
         )
 
     def _accumulate_usage(
@@ -389,7 +391,12 @@ class TenantModelAdapter(CompletionModelAdapter):
         if not existing:
             return new or TokenUsage()
         if not new:
-            return existing
+            return existing.model_copy(
+                update={
+                    "context_prompt_tokens": None,
+                    "context_completion_tokens": None,
+                }
+            )
 
         def _add(a: int | None, b: int | None) -> int | None:
             if a is None and b is None:
@@ -400,6 +407,8 @@ class TenantModelAdapter(CompletionModelAdapter):
             prompt_tokens=_add(existing.prompt_tokens, new.prompt_tokens),
             completion_tokens=_add(existing.completion_tokens, new.completion_tokens),
             reasoning_tokens=_add(existing.reasoning_tokens, new.reasoning_tokens),
+            context_prompt_tokens=new.context_prompt_tokens,
+            context_completion_tokens=new.context_completion_tokens,
         )
 
     def _build_image(self, file: File) -> dict[str, Any]:
@@ -1137,6 +1146,15 @@ class TenantModelAdapter(CompletionModelAdapter):
                 thinking_stripped = False
                 res.has_tool_calls = False
                 res.tool_calls_acc = {}
+                # If this request omits usage, the preceding request's context
+                # is stale. Keep spend, but do not report a false measurement.
+                if res.usage is not None:
+                    res.usage = res.usage.model_copy(
+                        update={
+                            "context_prompt_tokens": None,
+                            "context_completion_tokens": None,
+                        }
+                    )
 
                 async for chunk in s:
                     logger.debug(f"[DEBUG] Raw chunk: {chunk}")
