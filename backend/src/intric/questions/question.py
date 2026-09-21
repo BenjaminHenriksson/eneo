@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from pydantic import (
@@ -94,6 +94,8 @@ class QuestionAdd(QuestionBase):
     logging_details: Optional[LoggingDetails] = None
     assistant_id: Optional[UUID] = None
     tool_calls: Optional[list[ToolCallInfo]] = None
+    # Internal provider replay state; intentionally absent from public Message.
+    provider_history: Optional[dict[str, Any]] = None
 
     @model_validator(mode="after")
     def require_one_of_session_id_and_service_id(self) -> "QuestionAdd":

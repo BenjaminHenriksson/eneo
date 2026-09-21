@@ -839,6 +839,7 @@ class AssistantService:
                 generated_files: list[File] = []
                 tool_calls: list[ToolCallInfo] = []
                 stream_usage: TokenUsage | None = None
+                provider_history = None
                 completed = False
 
                 try:
@@ -848,6 +849,8 @@ class AssistantService:
 
                     async for chunk in completion:
                         reasoning_token_count = chunk.reasoning_token_count
+                        if getattr(chunk, "provider_history", None) is not None:
+                            provider_history = chunk.provider_history
                         if chunk.usage:
                             stream_usage = chunk.usage
 
@@ -1020,6 +1023,7 @@ class AssistantService:
                         or LoggingDetails(model_kwargs={}),
                         web_search_results=list(web_search_results or []),
                         tool_calls=tool_calls if tool_calls else None,
+                        provider_history=provider_history,
                     )
                     completed = True
 
@@ -1129,6 +1133,7 @@ class AssistantService:
             await self.session_service.complete_question_with_answer(
                 question_id=question_id,
                 answer=final_answer,
+                provider_history=getattr(response.completion, "provider_history", None),
                 num_tokens_question=num_tokens_question,
                 num_tokens_answer=num_tokens_answer,
                 context_tokens_question=response.usage.context_prompt_tokens

@@ -28,6 +28,7 @@ class Questions(BasePublic):
     context_tokens_question: Mapped[Optional[int]] = mapped_column(nullable=True)
     context_tokens_answer: Mapped[Optional[int]] = mapped_column(nullable=True)
     tool_calls: Mapped[Optional[list[object]]] = mapped_column(JSONB, nullable=True)
+    provider_history: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
 
     # Foreign keys
     completion_model_id: Mapped[Optional[UUID]] = mapped_column(

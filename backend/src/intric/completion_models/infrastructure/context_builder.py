@@ -430,12 +430,19 @@ class ContextBuilder:
                 message.generated_files, FileType.IMAGE
             )
             tool_calls = _replayable_tool_calls(message.tool_calls)
+            provider_history = getattr(message, "provider_history", None)
 
             message_tokens = (
                 count_tokens(question, model_name)
                 + count_tokens(answer, model_name)
                 + _tool_calls_token_count(tool_calls, model_name)
             )
+
+            if provider_history:
+                # Count the actual replay, including all tool rounds and reasoning.
+                message_tokens = count_tokens(question, model_name) + count_tokens(
+                    json.dumps(provider_history["messages"]), model_name
+                )
 
             if len(messages) > min_len and total_tokens + message_tokens > max_tokens:
                 break
@@ -448,6 +455,7 @@ class ContextBuilder:
                     images=images,
                     generated_images=generated_images,
                     tool_calls=tool_calls,
+                    provider_history=provider_history,
                 ),
             )
 

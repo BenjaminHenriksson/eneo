@@ -21,6 +21,7 @@ from typing import (
 import aiohttp
 import httpx
 import litellm
+import openai
 from litellm.exceptions import (
     APIConnectionError,
     APIError,
@@ -44,6 +45,12 @@ from intric.ai_models.completion_models.completion_model import (
 )
 from intric.completion_models.infrastructure.adapters.base_adapter import (
     CompletionModelAdapter,
+)
+from intric.completion_models.infrastructure.adapters.openrouter_client import (
+    completion as openrouter_completion,
+)
+from intric.completion_models.infrastructure.adapters.openrouter_client import (
+    merge_reasoning_details,
 )
 from intric.files.file_models import File
 from intric.logging.logging import LoggingDetails
@@ -73,6 +80,8 @@ _PROVIDER_UNAVAILABLE_TEXT = (
 )
 _PROVIDER_UNAVAILABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     APIConnectionError,
+    openai.APIConnectionError,
+    openai.InternalServerError,
     Timeout,
     ServiceUnavailableError,
     InternalServerError,
@@ -173,6 +182,8 @@ def _get_supported_openai_params(model: str) -> list[str] | None:
 
 
 def _acompletion_call(**kwargs: Any) -> Any:
+    if kwargs.get("model", "").startswith("openrouter/"):
+        return openrouter_completion(**kwargs)
     return cast(Callable[..., Any], getattr(litellm, "acompletion"))(**kwargs)
 
 
@@ -303,6 +314,8 @@ class TenantModelAdapter(CompletionModelAdapter):
 
     def _get_dropped_params(self, litellm_kwargs: dict[str, Any]) -> set[str]:
         """Get which params will be dropped by LiteLLM for this model."""
+        if self.provider_type == "openrouter":
+            return set()  # Native transport retains the provider's request fields.
         # Params that are not model params (credentials, config)
         non_model_params = {
             "api_key",
@@ -542,6 +555,10 @@ class TenantModelAdapter(CompletionModelAdapter):
             # one `role: tool` entry per call, then a post-tool assistant
             # message with the final answer. This matches what the live flow
             # produces during generation and keeps causal order intact.
+            history = msg.provider_history
+            if history and history.get("model") == self.litellm_model:
+                messages.extend(history["messages"])
+                continue
             if msg.tool_calls:
                 messages.append(
                     {
@@ -636,6 +653,12 @@ class TenantModelAdapter(CompletionModelAdapter):
             if value:
                 kwargs[field] = value
 
+        extra_body = self.credential_resolver.get_credential_field(field="extra_body")
+        if isinstance(extra_body, dict):
+            kwargs["extra_body"] = extra_body
+        if self.provider_type == "openrouter":
+            kwargs["context_window"] = self.model.max_input_tokens
+
         # Process model kwargs with provider-specific adjustments
         if model_kwargs:
             # Convert Pydantic ModelKwargs to dict if needed.
@@ -713,6 +736,7 @@ class TenantModelAdapter(CompletionModelAdapter):
 
         # Convert messages to OpenAI format (with vision support)
         messages = self._create_messages_from_context(context)
+        history_start = len(messages)
 
         # Build combined tools (Intric built-in + MCP)
         intric_tools = self._build_tools_from_context(context)
@@ -770,6 +794,11 @@ class TenantModelAdapter(CompletionModelAdapter):
                         {
                             "role": "assistant",
                             "content": msg.content,
+                            **(
+                                {"reasoning_details": msg.reasoning_details}
+                                if getattr(msg, "reasoning_details", None)
+                                else {}
+                            ),
                             "tool_calls": [
                                 {
                                     "id": tc.id,
@@ -835,13 +864,29 @@ class TenantModelAdapter(CompletionModelAdapter):
                     completion.text = self._strip_thinking_content(msg.content)
                 completion.stop = choice.finish_reason == "stop"
 
+            if response.choices and self.provider_type == "openrouter":
+                messages.append(
+                    {
+                        "role": "assistant",
+                        "content": msg.content,
+                        **(
+                            {"reasoning_details": msg.reasoning_details}
+                            if getattr(msg, "reasoning_details", None)
+                            else {}
+                        ),
+                    }
+                )
+                completion.provider_history = {
+                    "model": self.litellm_model,
+                    "messages": messages[history_start:],
+                }
             completion.usage = usage
             logger.info(
                 f"[TenantModelAdapter] {self.litellm_model}: Completion successful"
             )
             return completion
 
-        except AuthenticationError as exc:
+        except (AuthenticationError, openai.AuthenticationError) as exc:
             logger.error(
                 f"Authentication failed for tenant model {self.model.name}",
                 extra={
@@ -855,7 +900,7 @@ class TenantModelAdapter(CompletionModelAdapter):
                 f"Please verify your API key configuration."
             ) from exc
 
-        except RateLimitError as exc:
+        except (RateLimitError, openai.RateLimitError) as exc:
             logger.error(
                 f"Rate limit error for tenant model {self.model.name}",
                 extra={
@@ -867,7 +912,7 @@ class TenantModelAdapter(CompletionModelAdapter):
                 f"Rate limit exceeded for {self.provider_type}. Please try again later."
             ) from exc
 
-        except BadRequestError as exc:
+        except (BadRequestError, openai.BadRequestError) as exc:
             # Surface the actual error message for invalid parameters/values
             error_message = str(exc)
             logger.error(
@@ -1004,7 +1049,7 @@ class TenantModelAdapter(CompletionModelAdapter):
             )
             return stream
 
-        except AuthenticationError as exc:
+        except (AuthenticationError, openai.AuthenticationError) as exc:
             logger.error(
                 f"Authentication failed for streaming tenant model {self.model.name}",
                 extra={
@@ -1018,7 +1063,7 @@ class TenantModelAdapter(CompletionModelAdapter):
                 f"Please verify your API key configuration."
             ) from exc
 
-        except RateLimitError as exc:
+        except (RateLimitError, openai.RateLimitError) as exc:
             logger.error(
                 f"Rate limit error for streaming tenant model {self.model.name}",
                 extra={
@@ -1030,7 +1075,7 @@ class TenantModelAdapter(CompletionModelAdapter):
                 f"Rate limit exceeded for {self.provider_type}. Please try again later."
             ) from exc
 
-        except BadRequestError as exc:
+        except (BadRequestError, openai.BadRequestError) as exc:
             # Surface the actual error message for invalid parameters/values
             error_message = str(exc)
             logger.error(
@@ -1126,6 +1171,8 @@ class TenantModelAdapter(CompletionModelAdapter):
             # Get MCP context stored by prepare_streaming
             eneo_ctx = getattr(stream, "_eneo_context", None)
             mcp_proxy = eneo_ctx.get("mcp_proxy") if eneo_ctx else None
+            history_messages = eneo_ctx["messages"] if eneo_ctx else []
+            history_start = len(history_messages)
 
             # Shared state for tool call accumulation and usage across stream draining
             class _StreamResult:
@@ -1134,6 +1181,8 @@ class TenantModelAdapter(CompletionModelAdapter):
                     self.has_tool_calls: bool = False
                     self.tool_calls_acc: dict[int, _AccumulatedToolCall] = {}
                     self.usage: TokenUsage | None = None
+                    self.content = ""
+                    self.reasoning_details: list[dict[str, Any]] = []
 
             result = _StreamResult()
 
@@ -1146,6 +1195,8 @@ class TenantModelAdapter(CompletionModelAdapter):
                 thinking_stripped = False
                 res.has_tool_calls = False
                 res.tool_calls_acc = {}
+                res.content = ""
+                res.reasoning_details = []
                 # If this request omits usage, the preceding request's context
                 # is stale. Keep spend, but do not report a false measurement.
                 if res.usage is not None:
@@ -1175,6 +1226,11 @@ class TenantModelAdapter(CompletionModelAdapter):
 
                     delta = chunk.choices[0].delta
                     finish_reason = chunk.choices[0].finish_reason
+                    res.content += delta.content or ""
+                    merge_reasoning_details(
+                        res.reasoning_details,
+                        getattr(delta, "reasoning_details", None) or [],
+                    )
                     logger.debug(f"[DEBUG] Delta: {delta}")
 
                     # Accumulate tool call deltas
@@ -1427,7 +1483,12 @@ class TenantModelAdapter(CompletionModelAdapter):
                     messages.append(
                         {
                             "role": "assistant",
-                            "content": None,
+                            "content": result.content or None,
+                            **(
+                                {"reasoning_details": result.reasoning_details}
+                                if result.reasoning_details
+                                else {}
+                            ),
                             "tool_calls": [
                                 {
                                     "id": tc["id"],
@@ -1576,7 +1637,29 @@ class TenantModelAdapter(CompletionModelAdapter):
                     logger.warning(f"[MCP] Reached max tool rounds ({max_rounds})")
 
             # Final stop — attach accumulated usage
-            yield Completion(text="", stop=True, usage=result.usage)
+            provider_history = None
+            if self.provider_type == "openrouter":
+                history_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": result.content,
+                        **(
+                            {"reasoning_details": result.reasoning_details}
+                            if result.reasoning_details
+                            else {}
+                        ),
+                    }
+                )
+                provider_history = {
+                    "model": self.litellm_model,
+                    "messages": history_messages[history_start:],
+                }
+            yield Completion(
+                text="",
+                stop=True,
+                usage=result.usage,
+                provider_history=provider_history,
+            )
 
             logger.info(
                 f"[TenantModelAdapter] {self.litellm_model}: Stream iteration completed"

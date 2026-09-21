@@ -336,6 +336,7 @@ class SessionService:
         logging_details: LoggingDetails | None = None,
         web_search_results: Sequence["WebSearchResult"] | None = None,
         tool_calls: list[ToolCallInfo] | None = None,
+        provider_history: dict | None = None,
     ) -> None:
         """Update a placeholder Question row with the final assistant answer."""
         completion_model_id = completion_model.id if completion_model else None
@@ -350,6 +351,7 @@ class SessionService:
                 context_tokens_answer=context_tokens_answer,
                 completion_model_id=completion_model_id,
                 tool_calls=tool_calls,
+                provider_history=provider_history,
                 info_blob_chunks=info_blob_chunks,
                 generated_files=list(generated_files) if generated_files else None,
                 web_search_results=list(web_search_results)

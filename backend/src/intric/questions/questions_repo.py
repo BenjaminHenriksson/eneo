@@ -144,6 +144,7 @@ class QuestionRepository:
         context_tokens_answer: int | None = None,
         completion_model_id: UUID | None = None,
         tool_calls: list["ToolCallInfo"] | None = None,
+        provider_history: dict[str, Any] | None = None,
         info_blob_chunks: list[InfoBlobChunkInDBWithScore] | None = None,
         generated_files: list[File] | None = None,
         web_search_results: list["WebSearchResult"] | None = None,
@@ -179,6 +180,8 @@ class QuestionRepository:
             update_values["context_tokens_answer"] = context_tokens_answer
         if completion_model_id is not None:
             update_values["completion_model_id"] = completion_model_id
+        if provider_history is not None:
+            update_values["provider_history"] = provider_history
         if tool_calls is not None:
             update_values["tool_calls"] = [tc.model_dump() for tc in tool_calls]
         if logging_details_id is not None:

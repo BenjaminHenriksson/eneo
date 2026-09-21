@@ -102,6 +102,7 @@ class Completion:
     error: Optional[str] = None
     error_code: Optional[int] = None
     usage: Optional[TokenUsage] = None
+    provider_history: Optional[dict[str, Any]] = None
 
 
 class CompletionModelBase(BaseModel):
@@ -308,6 +309,7 @@ class Message(BaseModel):
     images: list[File] = []
     generated_images: list[File] = []
     tool_calls: list[MessageToolCall] = []
+    provider_history: Optional[dict[str, Any]] = None
 
 
 class Context(BaseModel):
