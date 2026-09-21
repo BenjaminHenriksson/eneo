@@ -1,5 +1,10 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "chat_tool_results": "Kartor och exporter",
+  "chat_open_map": "Öppna karta",
+  "chat_download_export": "Ladda ner export",
+  "chat_export_citation": "Källor för exporten",
+  "chat_export_expiry": "Länken upphör att gälla {hours} timmar efter exporten. Be om en ny exportlänk om den har gått ut.",
   "about": "Om",
   "accept_changes": "Acceptera ändringar",
   "accepted": "Accepterad",

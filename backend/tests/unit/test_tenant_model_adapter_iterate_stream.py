@@ -120,6 +120,39 @@ def _usage_chunk(prompt, completion):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("initial_text", ["Creating a map.", ""])
+async def test_tool_round_text_is_separated_without_changing_provider_history(initial_text):
+    adapter = _make_adapter()
+    adapter.provider_type = "openrouter"
+    proxy = _FakeMCPProxy()
+    stream = _AsyncChunkStream(
+        [_text_chunk(initial_text), _tool_call_chunk()],
+        eneo_context={"mcp_proxy": proxy, "messages": [], "kwargs": {}, "has_tools": True},
+    )
+    followups = [
+        _AsyncChunkStream([_tool_call_chunk(tool_call_id="call_2")]),
+        _AsyncChunkStream([
+            _text_chunk("Map"), _text_chunk(" "), _text_chunk("ready."),
+            _tool_call_chunk(tool_call_id="call_3"),
+        ]),
+        _AsyncChunkStream([_text_chunk("Export ready.", "stop")]),
+    ]
+    with patch(
+        "intric.completion_models.infrastructure.adapters.tenant_model_adapter._acompletion_call",
+        AsyncMock(side_effect=followups),
+    ):
+        output = await _collect(adapter, stream, require_tool_approval=False)
+    expected = "Map ready.\n\nExport ready."
+    if initial_text:
+        expected = initial_text + "\n\n" + expected
+    assert "".join(chunk.text or "" for chunk in output) == expected
+    assert [
+        message["content"] for message in output[-1].provider_history["messages"]
+        if message["role"] == "assistant"
+    ] == [initial_text or None, None, "Map ready.", "Export ready."]
+
+
+@pytest.mark.asyncio
 async def test_tool_rounds_keep_latest_context_and_cumulative_usage_separate():
     adapter = _make_adapter()
     proxy = _FakeMCPProxy()

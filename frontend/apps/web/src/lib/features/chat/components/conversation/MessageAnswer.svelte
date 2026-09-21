@@ -11,6 +11,7 @@
   import { m } from "$lib/paraglide/messages";
   import { ChevronRight, Check, X, Wrench } from "lucide-svelte";
   import { SvelteSet } from "svelte/reactivity";
+  import MessageArtifacts from "./MessageArtifacts.svelte";
 
   const chat = getChatService();
   const attachmentUrls = getAttachmentUrlService();
@@ -134,6 +135,8 @@
       </div>
     {/each}
   {/if}
+
+  <MessageArtifacts toolCalls={mcpToolCalls} />
 
   {#if mcpToolCalls && mcpToolCalls.length > 0}
     <div class="mb-5 flex flex-col gap-2">

@@ -1295,7 +1295,9 @@ class TenantModelAdapter(CompletionModelAdapter):
                         buffer = ""
 
             # --- Drain initial stream ---
+            has_visible_text = False
             async for comp in _drain_stream(stream, result):
+                has_visible_text = has_visible_text or bool(comp.text)
                 yield comp
 
             # --- MCP tool call loop ---
@@ -1630,7 +1632,15 @@ class TenantModelAdapter(CompletionModelAdapter):
                     )
 
                     # Drain follow-up stream
+                    # Provider messages are separate paragraphs in the displayed
+                    # answer. Keep native content/reasoning untouched for replay.
+                    needs_separator = has_visible_text
                     async for comp in _drain_stream(follow_up, result):
+                        if comp.text:
+                            if needs_separator:
+                                yield Completion(text="\n\n")
+                                needs_separator = False
+                            has_visible_text = True
                         yield comp
 
                 if tool_round >= max_rounds:

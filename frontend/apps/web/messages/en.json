@@ -1,5 +1,10 @@
 {
   "$schema": "https://inlang.com/schema/inlang-message-format",
+  "chat_tool_results": "Maps and exports",
+  "chat_open_map": "Open map",
+  "chat_download_export": "Download export",
+  "chat_export_citation": "Export sources",
+  "chat_export_expiry": "Link expires {hours} hours after export. Ask for a new export link if it has expired.",
   "about": "About",
   "accept_changes": "Accept changes",
   "accepted": "Accepted",
