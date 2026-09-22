@@ -79,7 +79,7 @@
       {...$option({ value: { id: model.id } })}
       use:option
     >
-      <ModelNameAndVendor {model}></ModelNameAndVendor>
+      <ModelNameAndVendor {model} descriptionMode="hidden"></ModelNameAndVendor>
       <div class="flex-grow"></div>
       <div class="check {$isSelected({ id: model.id }) ? 'block' : 'hidden'}">
         <IconCheck class="text-positive-stronger !size-8"></IconCheck>
