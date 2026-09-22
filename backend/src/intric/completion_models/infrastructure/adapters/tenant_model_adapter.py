@@ -56,6 +56,7 @@ from intric.files.file_models import File
 from intric.logging.logging import LoggingDetails
 from intric.main.exceptions import APIKeyNotConfiguredException, OpenAIException
 from intric.main.logging import get_logger
+from intric.mcp_servers.infrastructure.image_content import image_message
 from intric.model_providers.infrastructure.tenant_model_credential_resolver import (
     TenantModelCredentialResolver,
 )
@@ -825,6 +826,7 @@ class TenantModelAdapter(CompletionModelAdapter):
                     results = await mcp_proxy.call_tools_parallel(proxy_calls)
 
                     # Add tool results to messages
+                    image_messages: list[dict[str, Any]] = []
                     for tc, result in zip(msg.tool_calls, results):
                         result_text = ""
                         if result.get("content"):
@@ -842,6 +844,10 @@ class TenantModelAdapter(CompletionModelAdapter):
                                 "content": result_text,
                             }
                         )
+                        evidence = image_message(result, tc.id)
+                        if evidence:
+                            image_messages.append(evidence)
+                    messages.extend(image_messages)
 
                     # Follow-up completion without tools
                     follow_up_kwargs = {
@@ -1455,12 +1461,14 @@ class TenantModelAdapter(CompletionModelAdapter):
                         approved_tcs: list[_AccumulatedToolCall] = [
                             tc
                             for tc in tool_calls
-                            if decision_map.get(tc["id"] or "", (False, None))[0]
+                            if (decision_map.get(tc["id"] or "") or (False, None))[0]
                         ]
                         denied_tcs: list[_AccumulatedToolCall] = [
                             tc
                             for tc in tool_calls
-                            if not decision_map.get(tc["id"] or "", (False, None))[0]
+                            if not (decision_map.get(tc["id"] or "") or (False, None))[
+                                0
+                            ]
                         ]
                     else:
                         yield Completion(
@@ -1506,6 +1514,7 @@ class TenantModelAdapter(CompletionModelAdapter):
                     )
 
                     # Execute approved tools
+                    image_messages: list[dict[str, Any]] = []
                     if approved_tcs:
                         proxy_calls: list[tuple[str, dict[str, Any]]] = [
                             (
@@ -1544,6 +1553,9 @@ class TenantModelAdapter(CompletionModelAdapter):
                                     "content": text,
                                 }
                             )
+                            evidence = image_message(result_data, tc["id"] or "")
+                            if evidence:
+                                image_messages.append(evidence)
                             tool_info = mcp_proxy.get_tool_info(tc["function"]["name"])
                             if tool_info:
                                 server_name, tool_name = tool_info
@@ -1618,6 +1630,8 @@ class TenantModelAdapter(CompletionModelAdapter):
                             tool_calls_metadata=denied_metadata,
                         )
 
+                    # Keep every tool reply contiguous before adding visual evidence.
+                    messages.extend(image_messages)
                     # Follow-up streaming request (keep tools for next round)
                     follow_up = cast(
                         AsyncIterator[_LiteLLMStreamChunk],

@@ -23,6 +23,7 @@ from intric.mcp_servers.infrastructure.client.mcp_client import (
     MCPClient,
     MCPClientError,
 )
+from intric.mcp_servers.infrastructure.image_content import image_blocks
 
 logger = get_logger(__name__)
 
@@ -191,8 +192,17 @@ class MCPProxySession:
         self._failed_server_ids.add(server_id)
 
     def _truncate_tool_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        try:
+            image_blocks(result)
+        except ValueError as exc:
+            return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
         max_chars = _settings.mcp_tool_output_max_chars
-        serialized = json.dumps(result, ensure_ascii=False, default=str)
+        content: list[dict[str, Any]] = result.get("content") or []
+        text_result = dict(
+            result,
+            content=[item for item in content if item.get("type") != "image"],
+        )
+        serialized = json.dumps(text_result, ensure_ascii=False, default=str)
         if len(serialized) <= max_chars:
             return result
 
