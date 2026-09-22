@@ -1,3 +1,4 @@
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -25,12 +26,12 @@ router = APIRouter()
 @router.post(
     "/",
     response_model=ServicePublicWithUser,
-    responses=responses.get_responses([400, 404]),
-    deprecated=True,
+    responses=responses.get_responses([400, 403, 404]),
+    description="Create a service.",
 )
 async def create_service(
     service_model: ServiceCreatePublic,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     """Create a service.
 
@@ -43,31 +44,39 @@ async def create_service(
 
     service_in_db = await service_service.create_service(service_model)
 
+    assert service_in_db is not None, "Service must exist after creation"
     return from_domain_service(service_in_db)
 
 
-@router.get("/", response_model=PaginatedResponse[ServicePublicWithUser])
+@router.get(
+    "/",
+    response_model=PaginatedResponse[ServicePublicWithUser],
+    responses=responses.get_responses([]),
+    description="List services, optionally filtered by name.",
+)
 async def get_services(
-    name: str = None,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
+    name: str | None = None,
 ):
     service_service = container.service_service()
     services = await service_service.get_services(name)
 
     return {
         "count": len(services),
-        "items": [from_domain_service(service) for service in services],
+        "items": [
+            from_domain_service(service) for service in services if service is not None
+        ],
     }
 
 
 @router.get(
     "/{id}/",
     response_model=ServicePublicWithUser,
-    responses=responses.get_responses([404]),
+    responses=responses.get_responses([403, 404]),
 )
 async def get_service(
     id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     service_service = container.service_service()
 
@@ -79,12 +88,13 @@ async def get_service(
 @router.post(
     "/{id}/",
     response_model=ServicePublicWithUser,
-    responses=responses.get_responses([404]),
+    responses=responses.get_responses([400, 403, 404]),
+    description="Update a service. Omitted fields are not updated.",
 )
 async def update_service(
     id: UUID,
     service_model: ServiceUpdatePublic,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     """Omitted fields are not updated"""
 
@@ -92,6 +102,7 @@ async def update_service(
 
     service, permissions = await service_service.update_service(service_model, id)
 
+    assert service is not None, "Service must exist after update"
     return from_domain_service(service, permissions=permissions)
 
 
@@ -99,10 +110,11 @@ async def update_service(
     "/{id}/",
     status_code=204,
     responses=responses.get_responses([403, 404]),
+    description="Delete a service.",
 )
 async def delete_service(
     id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     service_service = container.service_service()
     await service_service.delete_service(id)
@@ -111,10 +123,12 @@ async def delete_service(
 @router.post(
     "/{id}/run/",
     response_model=ServiceOutput,
-    responses=responses.get_responses([404, 400]),
+    responses=responses.get_responses([400, 403, 404]),
+    description="Run a service. The output schema depends on the service's output validation.",
 )
 async def run_service(
-    input: RunService, service_runner: ServiceRunner = Depends(get_runner_from_service)
+    input: RunService,
+    service_runner: Annotated[ServiceRunner, Depends(get_runner_from_service)],
 ):
     """The schema of the output will be depending on the output validation of the service"""
     output = await service_runner.run(input=input.input, file_ids=input.files)
@@ -125,11 +139,11 @@ async def run_service(
 @router.get(
     "/{id}/run/",
     response_model=PaginatedResponse[ServiceRun],
-    responses=responses.get_responses([404]),
+    responses=responses.get_responses([403, 404]),
 )
 async def get_service_runs(
     id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     service_service = container.service_service()
     service, runs = await service_service.get_service_runs(id)
@@ -140,11 +154,16 @@ async def get_service_runs(
     }
 
 
-@router.post("/{id}/transfer/", status_code=204)
+@router.post(
+    "/{id}/transfer/",
+    status_code=204,
+    responses=responses.get_responses([400, 403, 404]),
+    description="Transfer a service to another space.",
+)
 async def transfer_service_to_space(
     id: UUID,
     transfer_req: TransferApplicationRequest,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     service_service = container.service_service()
 

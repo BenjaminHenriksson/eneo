@@ -1,5 +1,6 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
+  import { resolve } from "$app/paths";
   import { getIntric } from "$lib/core/Intric";
   import { getSpacesManager } from "$lib/features/spaces/SpacesManager";
   import TemplateCreateAssistant from "$lib/features/templates/components/assistants/TemplateCreateAssistant.svelte";
@@ -39,7 +40,9 @@
       });
       refreshCurrentSpace();
       if (openGroupChatAfterCreation) {
-        goto(`/spaces/${$currentSpace.routeId}/group-chats/${newGroup.id}/edit?next=default`);
+        goto(
+          resolve(`/spaces/${$currentSpace.routeId}/group-chats/${newGroup.id}/edit?next=default`)
+        );
       }
       newGroupChatName = "";
       $showCreateGroupChatDialog = false;
@@ -50,11 +53,13 @@
 </script>
 
 <div class="flex gap-[1px]">
-  <TemplateCreateAssistant settings={data.settings} let:trigger={createAssistantTrigger}>
+  <!-- eslint-disable-next-line @typescript-eslint/no-explicit-any -->
+  {#snippet triggerSnippet(createAssistantTrigger: any)}
     <Button variant="primary" is={createAssistantTrigger} class="!rounded-r-none"
       >{m.create_assistant()}</Button
-    ></TemplateCreateAssistant
-  >
+    >
+  {/snippet}
+  <TemplateCreateAssistant settings={data.settings} {triggerSnippet} />
   <Dropdown.Root gutter={2} arrowSize={0} placement="bottom-end">
     <Dropdown.Trigger asFragment let:trigger>
       <Button padding="icon" variant="primary" is={trigger} class="!rounded-l-none"

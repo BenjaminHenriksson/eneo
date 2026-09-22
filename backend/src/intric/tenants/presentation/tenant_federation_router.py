@@ -1,12 +1,16 @@
 # backend/src/intric/tenants/presentation/tenant_federation_router.py
 
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional, Self, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+# Audit logging - module level imports for consistency
+from intric.audit.domain.action_types import ActionType
+from intric.audit.domain.actor_types import ActorType
+from intric.audit.domain.entity_types import EntityType
 from intric.authentication import auth
 from intric.main.config import (
     Settings,
@@ -18,16 +22,12 @@ from intric.main.config import (
 from intric.main.container.container import Container
 from intric.main.logging import get_logger
 from intric.server.dependencies.container import get_container
-
-# Audit logging - module level imports for consistency
-from intric.audit.domain.action_types import ActionType
-from intric.audit.domain.actor_types import ActorType
-from intric.audit.domain.entity_types import EntityType
+from intric.server.protocol import responses
 
 logger = get_logger(__name__)
 
 
-def check_feature_enabled(settings: Settings = Depends(get_settings)) -> None:
+def check_feature_enabled(settings: Annotated[Settings, Depends(get_settings)]) -> None:
     """Verify federation feature is enabled."""
     if not settings.federation_enabled:
         raise HTTPException(
@@ -42,6 +42,7 @@ router = APIRouter(
         Depends(auth.authenticate_super_api_key),
         Depends(check_feature_enabled),
     ],
+    responses=responses.get_responses([401]),
 )
 
 
@@ -68,7 +69,9 @@ class FederationRequestBase(BaseModel):
         ],
     )
     client_id: str | None = Field(None, description="OAuth client ID")
-    client_secret: str | None = Field(None, min_length=8, description="OAuth client secret")
+    client_secret: str | None = Field(
+        None, min_length=8, description="OAuth client secret"
+    )
     allowed_domains: list[str] | None = Field(
         None,
         description="Email domains allowed for this tenant (e.g., ['stockholm.se'])",
@@ -147,20 +150,22 @@ class FederationRequestBase(BaseModel):
 class SetFederationRequest(FederationRequestBase):
     """Request model for providing a full tenant federation config."""
 
-    provider: str = Field(
+    # Pydantic field narrowing: required fields in subclass override optional fields in base.
+    # pyright: ignore[reportIncompatibleVariableOverride] applies per-field below.
+    provider: str = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
         ...,
         description="Identity provider label (e.g., 'mobilityguard', 'entra_id', 'okta', 'auth0')",
     )
-    discovery_endpoint: str = Field(
+    discovery_endpoint: str = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
         ...,
         description="OIDC discovery endpoint URL",
         examples=[
             "https://login.microsoftonline.com/{tenant-id}/v2.0/.well-known/openid-configuration"
         ],
     )
-    client_id: str = Field(..., description="OAuth client ID")
-    client_secret: str = Field(..., min_length=8, description="OAuth client secret")
-    allowed_domains: list[str] = Field(
+    client_id: str = Field(..., description="OAuth client ID")  # pyright: ignore[reportIncompatibleVariableOverride]
+    client_secret: str = Field(..., min_length=8, description="OAuth client secret")  # pyright: ignore[reportIncompatibleVariableOverride]
+    allowed_domains: list[str] = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
         default_factory=list,
         description="Email domains allowed for this tenant (e.g., ['stockholm.se'])",
         examples=[["stockholm.se", "stockholm.gov.se"]],
@@ -169,6 +174,24 @@ class SetFederationRequest(FederationRequestBase):
 
 class PatchFederationRequest(FederationRequestBase):
     """Request model for partially updating the current tenant federation config."""
+
+    @model_validator(mode="after")
+    def reject_null_required_fields(self) -> Self:
+        invalid_null_fields = [
+            field
+            for field in (
+                "provider",
+                "discovery_endpoint",
+                "client_id",
+                "client_secret",
+            )
+            if field in self.model_fields_set and getattr(self, field) is None
+        ]
+        if invalid_null_fields:
+            raise ValueError(
+                f"PATCH does not allow null for: {', '.join(invalid_null_fields)}"
+            )
+        return self
 
 
 class SetFederationResponse(BaseModel):
@@ -222,6 +245,7 @@ async def _fetch_discovery_metadata(
 ) -> dict[str, Any]:
     """Fetch and validate discovery metadata for a federation configuration."""
     import aiohttp
+
     from intric.main.aiohttp_client import aiohttp_client
 
     logger.info(
@@ -273,18 +297,28 @@ async def _fetch_discovery_metadata(
             detail=f"Failed to fetch discovery endpoint: {str(e)}",
         )
 
-    issuer = discovery.get("issuer")
-    authorization_endpoint = discovery.get("authorization_endpoint")
-    token_endpoint = discovery.get("token_endpoint")
-    userinfo_endpoint = discovery.get("userinfo_endpoint")
-    jwks_uri = discovery.get("jwks_uri")
-    token_auth_methods_supported_raw = discovery.get(
-        "token_endpoint_auth_methods_supported", []
+    # resp.json() returns Any; cast to typed dict at the HTTP boundary.
+    discovery_doc: dict[str, object] = (
+        cast(dict[str, object], discovery) if isinstance(discovery, dict) else {}
     )
-    if isinstance(token_auth_methods_supported_raw, list):
-        token_auth_methods_supported = token_auth_methods_supported_raw
-    elif token_auth_methods_supported_raw:
-        token_auth_methods_supported = [token_auth_methods_supported_raw]
+
+    def _str_field(key: str) -> str | None:
+        v = discovery_doc.get(key)
+        return v if isinstance(v, str) else None
+
+    issuer = _str_field("issuer")
+    authorization_endpoint = _str_field("authorization_endpoint")
+    token_endpoint = _str_field("token_endpoint")
+    userinfo_endpoint = _str_field("userinfo_endpoint")
+    jwks_uri = _str_field("jwks_uri")
+    methods_raw: object = (
+        discovery_doc.get("token_endpoint_auth_methods_supported") or []
+    )
+    if isinstance(methods_raw, list):
+        methods_list: list[object] = cast(list[object], methods_raw)
+        token_auth_methods_supported: list[str] = [str(m) for m in methods_list if m]
+    elif methods_raw:
+        token_auth_methods_supported = [str(methods_raw)]
     else:
         token_auth_methods_supported = []
 
@@ -299,7 +333,7 @@ async def _fetch_discovery_metadata(
                 "has_authorization_endpoint": bool(authorization_endpoint),
                 "has_token_endpoint": bool(token_endpoint),
                 "has_jwks_uri": bool(jwks_uri),
-                "discovery_keys": list(discovery.keys()),
+                "discovery_keys": list(discovery_doc.keys()),
             },
         )
         raise HTTPException(
@@ -381,7 +415,11 @@ def _merge_federation_config(
     if "allowed_domains" in updates:
         merged["allowed_domains"] = updates["allowed_domains"] or []
 
-    for field in ("canonical_public_origin", "redirect_path", "additional_redirect_uris"):
+    for field in (
+        "canonical_public_origin",
+        "redirect_path",
+        "additional_redirect_uris",
+    ):
         if field not in updates:
             continue
         value = updates[field]
@@ -449,11 +487,12 @@ async def _log_federation_update(
         "This replaces the current setup and requires all required fields. "
         "System admin only."
     ),
+    responses=responses.get_responses([400, 404]),
 )
 async def set_tenant_federation(
     tenant_id: UUID,
     request: SetFederationRequest,
-    container: Container = Depends(get_container()),
+    container: Annotated[Container, Depends(get_container())],
 ) -> SetFederationResponse:
     """
     Provide a full federation configuration for a tenant.
@@ -475,6 +514,7 @@ async def set_tenant_federation(
     encryption_service = container.encryption_service()
 
     tenant = await tenant_service.get_tenant_by_id(tenant_id)
+    assert tenant is not None
 
     discovery_metadata = await _fetch_discovery_metadata(
         tenant_id=tenant_id,
@@ -542,11 +582,12 @@ async def set_tenant_federation(
         "Only provided fields are changed; omitted fields stay unchanged. "
         "PATCH requires an existing federation config. System admin only."
     ),
+    responses=responses.get_responses([400, 404]),
 )
 async def patch_tenant_federation(
     tenant_id: UUID,
     request: PatchFederationRequest,
-    container: Container = Depends(get_container()),
+    container: Annotated[Container, Depends(get_container())],
 ) -> SetFederationResponse:
     """Partially update the current federation config for a tenant."""
     tenant_repo = container.tenant_repo()
@@ -554,6 +595,7 @@ async def patch_tenant_federation(
     encryption_service = container.encryption_service()
 
     tenant = await tenant_service.get_tenant_by_id(tenant_id)
+    assert tenant is not None
     existing_config = tenant.federation_config or {}
     if not existing_config:
         raise HTTPException(
@@ -566,17 +608,6 @@ async def patch_tenant_federation(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="At least one field must be provided for patch",
-        )
-
-    invalid_null_fields = [
-        field
-        for field in ("provider", "discovery_endpoint", "client_id", "client_secret")
-        if field in updates and updates[field] is None
-    ]
-    if invalid_null_fields:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"PATCH does not allow null for: {', '.join(invalid_null_fields)}",
         )
 
     provider = updates.get("provider") or existing_config.get("provider") or "unknown"
@@ -593,7 +624,10 @@ async def patch_tenant_federation(
     plaintext_secret: str | None = None
     encrypted_secret: str | None = None
     if "client_secret" in updates:
-        plaintext_secret = updates["client_secret"]
+        secret_raw: object = updates["client_secret"]
+        plaintext_secret = (
+            secret_raw if isinstance(secret_raw, str) else str(secret_raw)
+        )
         encrypted_secret = encryption_service.encrypt(plaintext_secret)
 
     federation_config = _merge_federation_config(
@@ -657,10 +691,11 @@ async def patch_tenant_federation(
     status_code=status.HTTP_200_OK,
     summary="Delete tenant federation config",
     description="Remove custom identity provider for tenant. System admin only.",
+    responses=responses.get_responses([404]),
 )
 async def delete_tenant_federation(
     tenant_id: UUID,
-    container: Container = Depends(get_container()),
+    container: Annotated[Container, Depends(get_container())],
 ) -> DeleteFederationResponse:
     """Delete federation config for tenant (revert to global IdP)."""
     tenant_repo = container.tenant_repo()
@@ -668,6 +703,7 @@ async def delete_tenant_federation(
 
     # Validate tenant exists (raises NotFoundException if not found)
     tenant = await tenant_service.get_tenant_by_id(tenant_id)
+    assert tenant is not None
 
     # Delete federation config
     await tenant_repo.delete_federation_config(tenant_id=tenant_id)
@@ -706,10 +742,11 @@ async def delete_tenant_federation(
     status_code=status.HTTP_200_OK,
     summary="Get tenant federation config",
     description="View federation config with masked secrets. System admin only.",
+    responses=responses.get_responses([404]),
 )
 async def get_tenant_federation(
     tenant_id: UUID,
-    container: Container = Depends(get_container()),
+    container: Annotated[Container, Depends(get_container())],
 ) -> FederationInfo:
     """Get federation config for tenant (masked secrets)."""
     tenant_repo = container.tenant_repo()
@@ -717,6 +754,7 @@ async def get_tenant_federation(
 
     # Validate tenant exists (raises NotFoundException if not found)
     tenant = await tenant_service.get_tenant_by_id(tenant_id)
+    assert tenant is not None
 
     # Get config with metadata
     metadata = await tenant_repo.get_federation_config_with_metadata(tenant_id)
@@ -726,6 +764,12 @@ async def get_tenant_federation(
             detail="No federation config found for tenant",
         )
 
+    configured_at: datetime
+    if metadata.get("encrypted_at"):
+        configured_at = datetime.fromisoformat(metadata["encrypted_at"])
+    else:
+        configured_at = tenant.updated_at or datetime.now(timezone.utc)
+
     return FederationInfo(
         provider=metadata["provider"],
         client_id=metadata["client_id"],
@@ -733,22 +777,22 @@ async def get_tenant_federation(
         issuer=metadata.get("issuer"),
         allowed_domains=metadata.get("allowed_domains", []),
         additional_redirect_uris=metadata.get("additional_redirect_uris", []),
-        configured_at=datetime.fromisoformat(metadata["encrypted_at"])
-        if metadata.get("encrypted_at")
-        else tenant.updated_at,
+        configured_at=configured_at,
         encryption_status=metadata["encryption_status"],
     )
 
 
 @router.post(
     "/{tenant_id}/federation/test",
+    response_model=None,
     status_code=status.HTTP_200_OK,
     summary="Test tenant federation config",
     description="Test connection to tenant's IdP. System admin only.",
+    responses=responses.get_responses([400, 404, 500]),
 )
 async def test_tenant_federation(
     tenant_id: UUID,
-    container: Container = Depends(get_container()),
+    container: Annotated[Container, Depends(get_container())],
 ):
     """
     Test federation config by fetching discovery endpoint.
@@ -764,6 +808,7 @@ async def test_tenant_federation(
 
     # Validate tenant exists (raises NotFoundException if not found)
     tenant = await tenant_service.get_tenant_by_id(tenant_id)
+    assert tenant is not None
     if not tenant.federation_config:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -779,6 +824,7 @@ async def test_tenant_federation(
 
     # Test connection
     import aiohttp
+
     from intric.main.aiohttp_client import aiohttp_client
 
     logger.info(

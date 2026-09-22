@@ -60,9 +60,12 @@ class TestTextMimeTypes:
         assert TextMimeTypes.has_value("application/pdf") is True
         assert TextMimeTypes.has_value("text/plain") is True
         assert TextMimeTypes.has_value("text/markdown") is True
-        assert TextMimeTypes.has_value(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ) is True
+        assert (
+            TextMimeTypes.has_value(
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            is True
+        )
         assert TextMimeTypes.has_value("application/vnd.ms-excel") is True
 
     def test_has_value_returns_false_for_invalid_mime(self):
@@ -129,7 +132,9 @@ class TestTextExtractorPDF:
         with patch("intric.files.text.pdfplumber.open") as mock_open:
             mock_page = MagicMock()
             mock_page.extract_text.return_value = "Sample PDF text content"
-            mock_open.return_value.__enter__ = MagicMock(return_value=MagicMock(pages=[mock_page]))
+            mock_open.return_value.__enter__ = MagicMock(
+                return_value=MagicMock(pages=[mock_page])
+            )
             mock_open.return_value.__exit__ = MagicMock(return_value=False)
 
             result = TextExtractor.extract_from_pdf(Path("test.pdf"))
@@ -164,7 +169,9 @@ class TestTextExtractorPDF:
         with patch("intric.files.text.pdfplumber.open") as mock_open:
             mock_page = MagicMock()
             mock_page.extract_text.return_value = "Hello\x00World"
-            mock_open.return_value.__enter__ = MagicMock(return_value=MagicMock(pages=[mock_page]))
+            mock_open.return_value.__enter__ = MagicMock(
+                return_value=MagicMock(pages=[mock_page])
+            )
             mock_open.return_value.__exit__ = MagicMock(return_value=False)
 
             result = TextExtractor.extract_from_pdf(Path("dummy.pdf"))
@@ -371,7 +378,9 @@ class TestTextExtractorExtractMethod:
     def test_extract_routes_pptx_correctly(self, tmp_path):
         """Should route PPTX files to PPTX extractor."""
         extractor = TextExtractor()
-        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        mime = (
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
 
         with patch.object(extractor, "extract_from_pptx", return_value="PPTX content"):
             result = extractor.extract(tmp_path / "test.pptx", mime)
@@ -435,6 +444,22 @@ class TestTextExtractorExtractMethod:
         result = extractor.extract(test_file, "application/octet-stream")
         assert result == "Unknown format content"
 
+    def test_extract_rejects_binary_fallthrough(self, tmp_path):
+        """Binary data routed to the text fallback must be rejected, not decoded.
+
+        Regression for issue #431: WebP/AVIF (and any binary) reaching the
+        unknown-mimetype fallback used to be cp1252-decoded into garbage and
+        written to the TEXT column, crashing Postgres. It must raise instead.
+        """
+        extractor = TextExtractor()
+
+        test_file = tmp_path / "image.webp"
+        # NUL byte marks the content as binary.
+        test_file.write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+
+        with pytest.raises(UnsupportedFormatError):
+            extractor.extract(test_file, "image/webp")
+
     def test_extract_strips_whitespace(self, tmp_path):
         """Should strip leading/trailing whitespace from result."""
         extractor = TextExtractor()
@@ -483,7 +508,10 @@ class TestTextExtractorErrorHandling:
             TextExtractor.extract_from_docx(bad_docx)
 
         assert exc_info.value.code == "CORRUPT"
-        assert "ZIP" in exc_info.value.message or "corrupt" in exc_info.value.message.lower()
+        assert (
+            "ZIP" in exc_info.value.message
+            or "corrupt" in exc_info.value.message.lower()
+        )
 
     def test_extract_from_pptx_raises_corrupt_error_on_bad_zip(self, tmp_path):
         """Should raise CorruptFileError for invalid PPTX (bad ZIP)."""
@@ -495,7 +523,10 @@ class TestTextExtractorErrorHandling:
             TextExtractor.extract_from_pptx(bad_pptx)
 
         assert exc_info.value.code == "CORRUPT"
-        assert "ZIP" in exc_info.value.message or "corrupt" in exc_info.value.message.lower()
+        assert (
+            "ZIP" in exc_info.value.message
+            or "corrupt" in exc_info.value.message.lower()
+        )
 
     def test_extract_raises_unsupported_format_for_legacy_doc(self, tmp_path):
         """Should raise UnsupportedFormatError for .doc files."""
@@ -532,7 +563,9 @@ class TestTextExtractorErrorHandling:
         test_file = tmp_path / "noperm.txt"
         test_file.write_text("content")
 
-        with patch("pathlib.Path.read_text", side_effect=PermissionError("Access denied")):
+        with patch(
+            "pathlib.Path.read_text", side_effect=PermissionError("Access denied")
+        ):
             with pytest.raises(ExtractionError) as exc_info:
                 TextExtractor.extract_from_plain_text(test_file)
 

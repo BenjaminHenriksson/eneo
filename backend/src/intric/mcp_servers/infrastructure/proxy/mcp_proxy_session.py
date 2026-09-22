@@ -9,20 +9,27 @@ Provides:
 """
 
 import asyncio
+import json
 import re
 import time
 from types import TracebackType
 from typing import Any
 from uuid import UUID
 
+from intric.main.config import get_settings
 from intric.main.logging import get_logger
 from intric.mcp_servers.domain.entities.mcp_server import MCPServer
 from intric.mcp_servers.infrastructure.client.mcp_client import (
     MCPClient,
     MCPClientError,
 )
+from intric.mcp_servers.infrastructure.image_content import image_blocks
 
 logger = get_logger(__name__)
+
+_settings = get_settings()
+_CIRCUIT_BREAKER_STATE: dict[UUID, dict[str, float | int]] = {}
+_CIRCUIT_BREAKER_LOCK = asyncio.Lock()
 
 
 class MCPProxySession:
@@ -50,6 +57,7 @@ class MCPProxySession:
                         (already filtered by tenant/space/assistant hierarchy)
             auth_credentials_map: Map of server_id -> auth credentials
         """
+        super().__init__()
         self.mcp_servers = mcp_servers
         self.auth_credentials_map = auth_credentials_map or {}
 
@@ -57,15 +65,17 @@ class MCPProxySession:
         self._clients: dict[UUID, MCPClient] = {}
         self._connection_locks: dict[UUID, asyncio.Lock] = {}
 
-        # Servers that failed to connect or errored mid-session. Tracked so
-        # call_tool can short-circuit without retrying connect on a non-owner
-        # task — that retry was the source of the anyio cancel-scope leak.
+        # Servers that failed to connect or errored mid-session. Tracked instead
+        # of dropping clients from the cache: drops would leak the underlying
+        # streamablehttp_client whose anyio cancel scope can only be exited from
+        # its owner task.
         self._failed_server_ids: set[UUID] = set()
 
         # The asyncio.Task that opened the first MCP connection. All subsequent
         # connect/disconnect calls must run on this task — the MCP SDK's
         # streamablehttp_client uses anyio cancel scopes that raise RuntimeError
-        # if entered and exited from different tasks.
+        # if entered and exited from different tasks. Captured lazily on first
+        # connect because session construction is synchronous.
         self._owner_task: asyncio.Task[Any] | None = None
 
         # Build tool registry from DB (no connections needed)
@@ -144,6 +154,75 @@ class MCPProxySession:
             f"from {len(self.mcp_servers)} servers"
         )
 
+    async def _is_circuit_open(self, server_id: UUID) -> bool:
+        async with _CIRCUIT_BREAKER_LOCK:
+            state = _CIRCUIT_BREAKER_STATE.get(server_id)
+            if not state:
+                return False
+            open_until = float(state.get("open_until", 0.0))
+            if open_until <= time.time():
+                _CIRCUIT_BREAKER_STATE.pop(server_id, None)
+                return False
+            return True
+
+    async def _record_failure(self, server_id: UUID) -> None:
+        async with _CIRCUIT_BREAKER_LOCK:
+            state = _CIRCUIT_BREAKER_STATE.setdefault(
+                server_id, {"failures": 0, "open_until": 0.0}
+            )
+            failures = int(state.get("failures", 0)) + 1
+            state["failures"] = failures
+            if failures >= _settings.mcp_circuit_breaker_failure_threshold:
+                state["open_until"] = (
+                    time.time() + _settings.mcp_circuit_breaker_cooldown_seconds
+                )
+
+    async def _record_success(self, server_id: UUID) -> None:
+        async with _CIRCUIT_BREAKER_LOCK:
+            _CIRCUIT_BREAKER_STATE.pop(server_id, None)
+
+    def _mark_server_failed(self, server_id: UUID) -> None:
+        """Mark a server unusable for the rest of this session.
+
+        We do NOT drop the client from the cache — that would orphan the
+        streamablehttp_client's anyio TaskGroup (its read/write loops keep
+        running until __aexit__ is called on the streams context). close()
+        will disconnect every cached client at session end, on the owner task.
+        """
+        self._failed_server_ids.add(server_id)
+
+    def _truncate_tool_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        try:
+            image_blocks(result)
+        except ValueError as exc:
+            return {"content": [{"type": "text", "text": str(exc)}], "is_error": True}
+        max_chars = _settings.mcp_tool_output_max_chars
+        content: list[dict[str, Any]] = result.get("content") or []
+        text_result = dict(
+            result,
+            content=[item for item in content if item.get("type") != "image"],
+        )
+        serialized = json.dumps(text_result, ensure_ascii=False, default=str)
+        if len(serialized) <= max_chars:
+            return result
+
+        preview = serialized[: max_chars // 2]
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "error": f"Tool output exceeded maximum size of {max_chars} characters",
+                            "partial_data_preview": preview,
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ],
+            "is_error": True,
+        }
+
     def get_tools_for_llm(self) -> list[dict[str, Any]]:
         """
         Get all available tools in OpenAI function calling format.
@@ -185,9 +264,9 @@ class MCPProxySession:
         """Bind this proxy session to the current asyncio.Task on first connect.
 
         Any later connect or disconnect from a different task would create or
-        destroy anyio cancel scopes across task boundaries, raising RuntimeError
-        inside the MCP SDK and silently leaking its TaskGroup children (the
-        persistent HTTP read/write loops).
+        destroy anyio cancel scopes across task boundaries, which raises
+        RuntimeError inside the MCP SDK and silently leaks its TaskGroup
+        children (the persistent HTTP read/write loops).
         """
         current = asyncio.current_task()
         if self._owner_task is None:
@@ -209,7 +288,8 @@ class MCPProxySession:
         """
         Get existing client or create new connection (lazy).
 
-        Must run on the proxy session's owner task.
+        Must run on the proxy session's owner task. Thread-safe via per-server
+        locks.
 
         Args:
             server: MCP server to connect to
@@ -283,6 +363,17 @@ class MCPProxySession:
 
         logger.debug(f"[MCPProxy] Calling {original_tool_name} on '{server.name}'")
 
+        if await self._is_circuit_open(server.id):
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "External tool service temporarily unavailable. Please retry later.",
+                    }
+                ],
+                "is_error": True,
+            }
+
         if server.id in self._failed_server_ids:
             return {
                 "content": [
@@ -306,7 +397,7 @@ class MCPProxySession:
                 "or failed",
                 server.name,
             )
-            self._failed_server_ids.add(server.id)
+            self._mark_server_failed(server.id)
             return {
                 "content": [
                     {
@@ -328,14 +419,18 @@ class MCPProxySession:
             logger.debug(
                 f"[MCPProxy] {original_tool_name} completed in {elapsed_ms:.0f}ms [{status}]"
             )
-
-            return result
+            if is_error:
+                await self._record_failure(server.id)
+            else:
+                await self._record_success(server.id)
+            return self._truncate_tool_result(result)
+        except MCPClientError:
+            self._mark_server_failed(server.id)
+            await self._record_failure(server.id)
+            raise
         except Exception:
-            # Mark failed instead of dropping from cache. Dropping would orphan
-            # the streamablehttp_client's anyio TaskGroup (its read/write loops
-            # only stop when __aexit__ runs on the streams context). close()
-            # disconnects every cached client on the owner task at session end.
-            self._failed_server_ids.add(server.id)
+            self._mark_server_failed(server.id)
+            await self._record_failure(server.id)
             raise
 
     async def call_tools_parallel(
@@ -383,7 +478,7 @@ class MCPProxySession:
                 logger.warning(
                     f"[MCPProxy] Failed to pre-connect to '{server.name}': {exc}"
                 )
-                self._failed_server_ids.add(server.id)
+                self._mark_server_failed(server.id)
 
         # Execute all tool calls in parallel
         async def execute_single(
@@ -391,12 +486,10 @@ class MCPProxySession:
         ) -> dict[str, Any]:
             try:
                 return await self.call_tool(tool_name, arguments)
-            except Exception as e:
-                logger.error(f"[MCPProxy] Tool {tool_name} failed: {e}")
+            except Exception:
+                logger.error(f"[MCPProxy] Tool {tool_name} failed")
                 return {
-                    "content": [
-                        {"type": "text", "text": f"Error executing tool: {str(e)}"}
-                    ],
+                    "content": [{"type": "text", "text": "Error executing tool."}],
                     "is_error": True,
                 }
 
@@ -436,7 +529,15 @@ class MCPProxySession:
                 current,
             )
 
-        for server_id, client in self._clients.items():
+        # Disconnect in reverse-connect order. Each streamablehttp_client
+        # __aenter__ pushes an anyio cancel scope onto this task's scope
+        # stack; anyio enforces strict LIFO on __aexit__. Iterating in
+        # insertion order would try to exit the first-connected client
+        # while later clients' scopes are still on top, which anyio rejects
+        # with "Attempted to exit a cancel scope that isn't the current
+        # task's current cancel scope" and silently leaks the underlying
+        # HTTP read/write TaskGroup children.
+        for server_id, client in reversed(self._clients.items()):
             try:
                 await client.disconnect()
             except Exception as e:

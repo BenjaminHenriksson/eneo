@@ -10,6 +10,7 @@
   import { derived, type Readable } from "svelte/store";
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
+  import { resolve } from "$app/paths";
   import DashboardAppInput from "./DashboardAppInput.svelte";
   import { formatEmojiTitle } from "$lib/core/formatting/formatEmojiTitle";
   import { m } from "$lib/paraglide/messages";
@@ -58,7 +59,7 @@
       inputs = createEmptyInputs();
       clearUploads();
       isSubmitting = false;
-      goto(`/dashboard/app/${$app.id}/results/${result.id}`);
+      goto(resolve(`/dashboard/app/${$app.id}/results/${result.id}`));
     } catch (err) {
       console.error(err);
       toastError(err);
@@ -107,4 +108,3 @@
 {#if isDragging}
   <AttachmentDropArea bind:isDragging label={m.drop_files_here_upload({ appName: $app.name })} />
 {/if}
-

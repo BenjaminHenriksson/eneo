@@ -15,6 +15,7 @@
   import { m } from "$lib/paraglide/messages";
   import { toast } from "$lib/components/toast";
   import { toastError } from "$lib/core/errors";
+  import { SvelteMap, SvelteSet } from "svelte/reactivity";
   import SharePointFolderTree from "./SharePointFolderTree.svelte";
   import { buildSharePointSelectionKey, normalizeSharePointPath } from "./selectionKey";
 
@@ -93,7 +94,6 @@
     }
   }
 
-
   let filteredResources = $derived.by(() => {
     const search = $inputValue.toLowerCase();
     return (availableResources ?? [])
@@ -111,7 +111,7 @@
   });
 
   let groupedFilteredResources = $derived.by(() => {
-    const grouped = new Map<PreviewCategory, PreviewOption[]>();
+    const grouped = new SvelteMap<PreviewCategory, PreviewOption[]>();
     for (const resource of filteredResources) {
       const category = getPreviewCategory(resource.value);
       const existing = grouped.get(category);
@@ -239,7 +239,7 @@
     );
 
     const effectiveEntries: SelectedImportItem[] = [];
-    const excludedKeys = new Set<string>();
+    const excludedKeys = new SvelteSet<string>();
 
     for (const entry of sortedItems) {
       const blockedByParent = effectiveEntries.some((existing) => {
@@ -278,24 +278,26 @@
     const { id } = integration;
     if (!id) return;
 
+    const site = selectedSite;
+
     try {
-      const resourceType = selectedSite.type === "onedrive" ? "onedrive" : "site";
+      const resourceType = site.type === "onedrive" ? "onedrive" : "site";
       const batchItems = dedupedSelection.effectiveEntries.map((entry) => {
         const trimmedName = entry.importName.trim();
         const name = trimmedName.length > 0 ? trimmedName : getDefaultImportName(entry.item);
 
         if (entry.item.type === "site_root") {
           return {
-            key: selectedSite.key,
+            key: site.key,
             name,
-            url: selectedSite.url ?? "",
+            url: site.url ?? "",
             type: "site_root",
             resource_type: resourceType
           };
         }
 
         return {
-          key: selectedSite.key,
+          key: site.key,
           name,
           url: entry.item.web_url ?? "",
           folder_id: entry.item.id,
@@ -313,9 +315,12 @@
         space: $currentSpace
       });
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const createdItems = response.items.filter((item: any) => item.status === "created");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const failedItems = response.items.filter((item: any) => item.status === "failed");
 
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       createdItems.forEach((item: any) => {
         if (item.job) {
           addJob(item.job);
@@ -499,11 +504,14 @@
 
             {#if requiresWrapperName}
               <div class="mx-4 mb-1">
-                <label class="text-secondary mb-1 block text-xs">
+                <label for="sharepoint-wrapper-name" class="text-secondary mb-1 block text-xs">
                   {m.sharepoint_wrapper_name_label()} <span class="text-label-stronger">*</span>
                 </label>
-                <p class="text-secondary mb-1 text-xs">{m.sharepoint_wrapper_name_required_hint()}</p>
+                <p class="text-secondary mb-1 text-xs">
+                  {m.sharepoint_wrapper_name_required_hint()}
+                </p>
                 <input
+                  id="sharepoint-wrapper-name"
                   class="border-default bg-primary w-full rounded border px-2 py-1 text-sm"
                   class:border-label-default={wrapperNameMissing}
                   value={wrapperName}
@@ -514,7 +522,9 @@
                   }}
                 />
                 {#if wrapperNameMissing}
-                  <p class="text-label-stronger mt-1 text-xs">{m.sharepoint_wrapper_name_missing_hint()}</p>
+                  <p class="text-label-stronger mt-1 text-xs">
+                    {m.sharepoint_wrapper_name_missing_hint()}
+                  </p>
                 {/if}
               </div>
             {/if}
@@ -569,7 +579,9 @@
 
     <Dialog.Controls>
       {#if wrapperNameMissing}
-        <span class="text-secondary mr-auto text-xs">{m.sharepoint_wrapper_name_missing_hint()}</span>
+        <span class="text-secondary mr-auto text-xs"
+          >{m.sharepoint_wrapper_name_missing_hint()}</span
+        >
       {/if}
       <Button
         onclick={() => {

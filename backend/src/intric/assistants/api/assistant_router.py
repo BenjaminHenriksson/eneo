@@ -1,8 +1,10 @@
 import logging
+from collections.abc import Sequence
 from datetime import datetime
+from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from intric.assistants.api import assistant_protocol
 from intric.assistants.api.assistant_models import (
@@ -11,11 +13,37 @@ from intric.assistants.api.assistant_models import (
     AssistantPublic,
     AssistantUpdatePublic,
 )
-from intric.authentication.auth_models import ApiKey
-from intric.database.database import AsyncSession, get_session_with_transaction
+
+# Audit logging - module level imports for consistency
+from intric.audit.application.audit_metadata import AuditMetadata
+from intric.audit.domain.action_types import ActionType
+from intric.audit.domain.entity_types import EntityType
+from intric.authentication.api_key_notification_auto_follow import (
+    auto_follow_on_publish,
+)
+from intric.authentication.api_key_router_helpers import (
+    error_responses as api_key_error_responses,
+)
+from intric.authentication.auth_dependencies import (
+    get_scope_filter,
+    require_resource_permission_for_method,
+    require_user_for_creation,
+    require_user_identity,
+)
+from intric.authentication.auth_models import (
+    ApiKey,
+    ApiKeyNotificationTargetType,
+    audit_actor_for,
+)
+from intric.database.database import AsyncSession
 from intric.main.config import get_settings
 from intric.main.container.container import Container
-from intric.main.models import NOT_PROVIDED, CursorPaginatedResponse, PaginatedResponse
+from intric.main.models import (
+    NOT_PROVIDED,
+    CursorPaginatedResponse,
+    PaginatedResponse,
+    is_provided,
+)
 from intric.prompts.api.prompt_models import PromptSparse
 from intric.server import protocol
 from intric.server.dependencies.container import get_container
@@ -32,27 +60,42 @@ from intric.sessions.session_protocol import (
 )
 from intric.spaces.api.space_models import TransferApplicationRequest
 
-# Audit logging - module level imports for consistency
-from intric.audit.application.audit_metadata import AuditMetadata
-from intric.audit.domain.action_types import ActionType
-from intric.audit.domain.entity_types import EntityType
-
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# These limits keep the endpoint responsive while still supporting large-context models.
+_LEGACY_ASSISTANT_API_KEY_EXAMPLE = {
+    "key": "ina_6f2c9b3a8f...7b31",
+    "truncated_key": "7b31",
+}
 
 
 @router.post(
     "/",
     response_model=AssistantPublic,
-    responses=responses.get_responses([404]),
-    deprecated=True,
+    description="Create a new assistant in a space.",
+    responses=responses.get_responses([403, 404]),
 )
 async def create_assistant(
+    request: Request,
     assistant: AssistantCreatePublic,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
+    _user_for_creation: None = Depends(require_user_for_creation),
 ):
+    # Scope validation: scoped keys cannot create assistants outside their scope
+    scope_filter = get_scope_filter(request)
+    if scope_filter.space_id is not None:
+        if scope_filter.space_id != assistant.space_id:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "insufficient_scope",
+                    "message": (
+                        f"API key is scoped to space '{scope_filter.space_id}'. "
+                        f"Cannot create assistant in space '{assistant.space_id}'."
+                    ),
+                },
+            )
+
     assistant_service = container.assistant_service()
     assembler = container.assistant_assembler()
     current_user = container.user()
@@ -75,22 +118,33 @@ async def create_assistant(
     extra = {
         "type": created_assistant.type.value if created_assistant.type else "standard",
         "configuration": {
-            "model": created_assistant.completion_model.nickname if created_assistant.completion_model else None,
-            "temperature": created_assistant.completion_model_kwargs.temperature if created_assistant.completion_model_kwargs else None,
-            "top_p": created_assistant.completion_model_kwargs.top_p if created_assistant.completion_model_kwargs else None,
+            "model": created_assistant.completion_model.nickname
+            if created_assistant.completion_model
+            else None,
+            "temperature": created_assistant.completion_model_kwargs.temperature
+            if created_assistant.completion_model_kwargs
+            else None,
+            "top_p": created_assistant.completion_model_kwargs.top_p
+            if created_assistant.completion_model_kwargs
+            else None,
             "data_retention_days": created_assistant.data_retention_days,
-            "insights_enabled": created_assistant.insight_enabled if hasattr(created_assistant, 'insight_enabled') else None,
+            "insights_enabled": created_assistant.insight_enabled
+            if hasattr(created_assistant, "insight_enabled")
+            else None,
             "published": created_assistant.published,
         },
     }
 
+    created_assistant_id = created_assistant.id
+    assert created_assistant_id is not None
+
     audit_service = container.audit_service()
     await audit_service.log_async(
         tenant_id=current_user.tenant_id,
-        actor_id=current_user.id,
+        user=current_user,
         action=ActionType.ASSISTANT_CREATED,
         entity_type=EntityType.ASSISTANT,
-        entity_id=created_assistant.id,
+        entity_id=created_assistant_id,
         description=f"Created assistant '{created_assistant.name}'",
         metadata=AuditMetadata.standard(
             actor=current_user,
@@ -103,17 +157,47 @@ async def create_assistant(
     return assembler.from_assistant_to_model(created_assistant, permissions=permissions)
 
 
-@router.get("/", response_model=PaginatedResponse[AssistantPublic])
+@router.get(
+    "/",
+    response_model=PaginatedResponse[AssistantPublic],
+    description="List assistants. Requires Admin permission if `for_tenant` is `true`.",
+    responses=responses.get_responses([403]),
+)
 async def get_assistants(
-    name: str = None,
+    request: Request,
+    container: Annotated[Container, Depends(get_container(with_user=True))],
+    name: str | None = None,
     for_tenant: bool = False,
-    container: Container = Depends(get_container(with_user=True)),
 ):
     """Requires Admin permission if `for_tenant` is `true`."""
+    scope_filter = get_scope_filter(request)
+
+    # Assistant-scoped keys must not bypass scope via for_tenant
+    if (
+        for_tenant
+        and scope_filter.scope_type is not None
+        and scope_filter.scope_type != "tenant"
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "insufficient_scope",
+                "message": (
+                    "Scoped API keys cannot use for_tenant=true. "
+                    "This parameter requires a tenant-scoped key or bearer auth."
+                ),
+            },
+        )
+
     service = container.assistant_service()
     assembler = container.assistant_assembler()
 
-    assistants = await service.get_assistants(name, for_tenant)
+    assistants = await service.get_assistants(
+        name,
+        for_tenant,
+        space_id_filter=scope_filter.space_id,
+        assistant_id_filter=scope_filter.assistant_id,
+    )
 
     assistants = [
         assembler.from_assistant_to_model(assistant)
@@ -127,29 +211,35 @@ async def get_assistants(
 @router.get(
     "/{id}/",
     response_model=AssistantPublic,
-    responses=responses.get_responses([400, 404]),
+    responses=responses.get_responses([400, 403, 404]),
 )
 async def get_assistant(
     id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     service = container.assistant_service()
     assembler = container.assistant_assembler()
 
     assistant, permissions = await service.get_assistant(assistant_id=id)
+    is_help_assistant = await service.is_help_assistant(assistant_id=id)
 
-    return assembler.from_assistant_to_model(assistant=assistant, permissions=permissions)
+    return assembler.from_assistant_to_model(
+        assistant=assistant,
+        permissions=permissions,
+        is_help_assistant=is_help_assistant,
+    )
 
 
 @router.post(
     "/{id}/",
     response_model=AssistantPublic,
-    responses=responses.get_responses([400, 404]),
+    description="Update an assistant. Omitted fields are not updated.",
+    responses=responses.get_responses([400, 403, 404]),
 )
 async def update_assistant(
     id: UUID,
     assistant: AssistantUpdatePublic,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     """Omitted fields are not updated"""
     service = container.assistant_service()
@@ -163,6 +253,7 @@ async def update_assistant(
     old_mcp_tool_overrides = None
     if assistant.mcp_tools is not None:
         import sqlalchemy as sa
+
         from intric.database.tables.assistant_table import AssistantMCPServerTools
 
         stmt = sa.select(
@@ -178,11 +269,11 @@ async def update_assistant(
 
     groups = None
     if assistant.groups is not None:
-        groups = [group.id for group in assistant.groups]
+        groups = [g.id for g in assistant.groups]
 
     websites = None
     if assistant.websites is not None:
-        websites = [website.id for website in assistant.websites]
+        websites = [w.id for w in assistant.websites]
 
     integration_knowledge_ids = None
     if assistant.integration_knowledge_list is not None:
@@ -190,11 +281,13 @@ async def update_assistant(
 
     mcp_server_ids = None
     if assistant.mcp_servers is not None:
-        mcp_server_ids = [mcp.id for mcp in assistant.mcp_servers]
+        mcp_server_ids = [m.id for m in assistant.mcp_servers]
 
     mcp_tool_settings = None
     if assistant.mcp_tools is not None:
-        mcp_tool_settings = [(tool.tool_id, tool.is_enabled) for tool in assistant.mcp_tools]
+        mcp_tool_settings = [
+            (tool.tool_id, tool.is_enabled) for tool in assistant.mcp_tools
+        ]
 
     completion_model_id = None
     if assistant.completion_model is not None:
@@ -217,6 +310,10 @@ async def update_assistant(
     if "metadata_json" not in request_dict:
         metadata_json = NOT_PROVIDED
 
+    data_retention_days = assistant.data_retention_days
+    if "data_retention_days" not in request_dict:
+        data_retention_days = NOT_PROVIDED
+
     # Handle icon_id: check if it was provided in the request
     icon_id = NOT_PROVIDED
     if "icon_id" in request_dict:
@@ -237,99 +334,156 @@ async def update_assistant(
         mcp_tools=mcp_tool_settings,
         description=description,
         insight_enabled=assistant.insight_enabled,
-        data_retention_days=assistant.data_retention_days,
+        data_retention_days=data_retention_days,
         metadata_json=metadata_json,
         icon_id=icon_id,
     )
 
     # Track ALL changes comprehensively
-    changes = {}
+    changes: dict[str, object] = {}
 
     # Name change
     if assistant.name and assistant.name != old_assistant.name:
         changes["name"] = {"old": old_assistant.name, "new": assistant.name}
 
-    # Prompt change
-    if assistant.prompt and assistant.prompt.text:
+    # Prompt change. Mirror the apps router: trigger on `prompt is not None`
+    # (the field was included in the request) and treat an empty new text
+    # as "prompt was cleared" rather than ignoring it — see the matching
+    # service-side comment in `assistant_service.update_assistant` for the
+    # bug this used to mask.
+    if assistant.prompt is not None:
+        new_prompt_text = assistant.prompt.text or ""
         old_prompt_text = old_assistant.prompt.text if old_assistant.prompt else ""
-        if assistant.prompt.text != old_prompt_text:
-            prompt_preview = assistant.prompt.text[:50] + "..." if len(assistant.prompt.text) > 50 else assistant.prompt.text
+        if new_prompt_text != old_prompt_text:
+            prompt_preview = (
+                new_prompt_text[:50] + "..."
+                if len(new_prompt_text) > 50
+                else new_prompt_text
+            )
             changes["prompt"] = {
                 "changed": True,
-                "preview": prompt_preview
+                "preview": prompt_preview if new_prompt_text else "Removed prompt",
             }
 
     # Model change
-    if completion_model_id and old_assistant.completion_model and completion_model_id != old_assistant.completion_model.id:
+    if (
+        completion_model_id
+        and old_assistant.completion_model
+        and completion_model_id != old_assistant.completion_model.id
+    ):
         changes["model"] = {
-            "old": old_assistant.completion_model.nickname if old_assistant.completion_model else None,
-            "new": updated_assistant.completion_model.nickname if updated_assistant.completion_model else None
+            "old": old_assistant.completion_model.nickname
+            if old_assistant.completion_model
+            else None,
+            "new": updated_assistant.completion_model.nickname
+            if updated_assistant.completion_model
+            else None,
         }
 
     # Temperature/Top-p changes
     # Get temperature values from completion_model_kwargs
-    old_temperature = old_assistant.completion_model_kwargs.temperature if old_assistant.completion_model_kwargs else None
-    new_temperature = updated_assistant.completion_model_kwargs.temperature if updated_assistant.completion_model_kwargs else None
+    old_temperature = (
+        old_assistant.completion_model_kwargs.temperature
+        if old_assistant.completion_model_kwargs
+        else None
+    )
+    new_temperature = (
+        updated_assistant.completion_model_kwargs.temperature
+        if updated_assistant.completion_model_kwargs
+        else None
+    )
     if old_temperature != new_temperature:
         changes["temperature"] = {"old": old_temperature, "new": new_temperature}
 
-    old_top_p = old_assistant.completion_model_kwargs.top_p if old_assistant.completion_model_kwargs else None
-    new_top_p = updated_assistant.completion_model_kwargs.top_p if updated_assistant.completion_model_kwargs else None
+    old_top_p = (
+        old_assistant.completion_model_kwargs.top_p
+        if old_assistant.completion_model_kwargs
+        else None
+    )
+    new_top_p = (
+        updated_assistant.completion_model_kwargs.top_p
+        if updated_assistant.completion_model_kwargs
+        else None
+    )
     if old_top_p != new_top_p:
         changes["top_p"] = {"old": old_top_p, "new": new_top_p}
 
     # Description change
-    if description is not NOT_PROVIDED and description != old_assistant.description:
-        old_desc_preview = (old_assistant.description[:50] + "...") if old_assistant.description and len(old_assistant.description) > 50 else old_assistant.description
-        new_desc_preview = (description[:50] + "...") if description and len(description) > 50 else description
+    if is_provided(description) and description != old_assistant.description:
+        if isinstance(old_assistant.description, str):
+            old_desc_preview = (
+                (old_assistant.description[:50] + "...")
+                if len(old_assistant.description) > 50
+                else old_assistant.description
+            )
+        else:
+            old_desc_preview = old_assistant.description
+        if isinstance(description, str):
+            new_desc_preview = (
+                (description[:50] + "...") if len(description) > 50 else description
+            )
+        else:
+            new_desc_preview = description
         changes["description"] = {"old": old_desc_preview, "new": new_desc_preview}
 
     # Insights change
     if assistant.insight_enabled != old_assistant.insight_enabled:
-        changes["insights_enabled"] = {"old": old_assistant.insight_enabled, "new": assistant.insight_enabled}
+        changes["insights_enabled"] = {
+            "old": old_assistant.insight_enabled,
+            "new": assistant.insight_enabled,
+        }
 
     # Data retention change
     if assistant.data_retention_days != old_assistant.data_retention_days:
         changes["data_retention_days"] = {
             "old": old_assistant.data_retention_days,
-            "new": assistant.data_retention_days
+            "new": assistant.data_retention_days,
         }
 
     # Helper function to track added/removed items
-    def get_changes_for_list(old_list, new_list, name_attr='name', is_attachment=False, assistant_space_id=None):
+    def get_changes_for_list(
+        old_list: Sequence[object] | None,
+        new_list: Sequence[object] | None,
+        name_attr: str = "name",
+        is_attachment: bool = False,
+        assistant_space_id: UUID | None = None,
+    ) -> tuple[list[dict[str, str | None]], list[dict[str, str | None]]]:
         """Compare two lists and return added/removed items with their IDs, names, and scope."""
-        old_items = {}
-        new_items = {}
+        old_items: dict[str, dict[str, str | None]] = {}
+        new_items: dict[str, dict[str, str | None]] = {}
 
-        def get_scope(item, assistant_space_id):
+        def get_scope(item: object, assistant_space_id: UUID | None) -> str | None:
             """Determine if knowledge is 'space' or 'organizational'"""
-            if not assistant_space_id or not hasattr(item, 'space_id'):
+            if assistant_space_id is None or not hasattr(item, "space_id"):
                 return None  # Cannot determine scope
 
             # If the item's space_id matches the assistant's, it's space-scoped
             # Otherwise, it's organizational (from parent/org space)
-            if item.space_id == assistant_space_id:
+            if getattr(item, "space_id") == assistant_space_id:
                 return "space"
             else:
                 return "organizational"
 
-        def extract_item_info(item, assistant_space_id):
+        def extract_item_info(
+            item: object, assistant_space_id: UUID | None
+        ) -> tuple[str, str, str | None]:
             """Extract ID, name, and scope from an item, handling attachments specially."""
-            item_id = str(item.id) if hasattr(item, 'id') else str(item)
+            item_id = str(getattr(item, "id", item))
 
             # Special handling for FileAttachment objects
             if is_attachment:
                 # For attachments, extract just the filename and optionally blob ID
-                item_name = item.name if hasattr(item, 'name') else 'unknown_file'
+                item_name = str(getattr(item, "name", "unknown_file"))
                 # Add blob ID if it exists and is not None
-                if hasattr(item, 'blob') and item.blob:
-                    item_name = f"{item_name} (blob: {item.blob})"
+                blob = getattr(item, "blob", None)
+                if blob:
+                    item_name = f"{item_name} (blob: {blob})"
             else:
                 # For other types, use the specified attribute or a safe fallback
                 if hasattr(item, name_attr):
-                    item_name = getattr(item, name_attr)
-                elif hasattr(item, 'name'):
-                    item_name = item.name
+                    item_name = str(getattr(item, name_attr))
+                elif hasattr(item, "name"):
+                    item_name = str(getattr(item, "name"))
                 else:
                     # Only use str() for simple types, not complex objects
                     item_name = f"{item.__class__.__name__}_{item_id}"
@@ -350,18 +504,24 @@ async def update_assistant(
                 new_items[item_id] = {"name": item_name, "scope": scope}
 
         # Build added/removed lists with scope information
-        added = []
+        added: list[dict[str, str | None]] = []
         for k in new_items:
             if k not in old_items:
-                item_data = {"id": k, "name": new_items[k]["name"]}
+                item_data: dict[str, str | None] = {
+                    "id": k,
+                    "name": new_items[k]["name"],
+                }
                 if new_items[k]["scope"]:
                     item_data["scope"] = new_items[k]["scope"]
                 added.append(item_data)
 
-        removed = []
+        removed: list[dict[str, str | None]] = []
         for k in old_items:
             if k not in new_items:
-                item_data = {"id": k, "name": old_items[k]["name"]}
+                item_data: dict[str, str | None] = {
+                    "id": k,
+                    "name": old_items[k]["name"],
+                }
                 if old_items[k]["scope"]:
                     item_data["scope"] = old_items[k]["scope"]
                 removed.append(item_data)
@@ -369,12 +529,13 @@ async def update_assistant(
         return added, removed
 
     # Track knowledge source changes in detail
-    knowledge_changes = {}
+    knowledge_changes: dict[str, dict[str, list[dict[str, str | None]]]] = {}
 
     # Collections
     collections_added, collections_removed = get_changes_for_list(
-        old_assistant.collections, updated_assistant.collections,
-        assistant_space_id=updated_assistant.space_id
+        old_assistant.collections,
+        updated_assistant.collections,
+        assistant_space_id=updated_assistant.space_id,
     )
     if collections_added or collections_removed:
         knowledge_changes["collections"] = {}
@@ -385,8 +546,10 @@ async def update_assistant(
 
     # Websites
     websites_added, websites_removed = get_changes_for_list(
-        old_assistant.websites, updated_assistant.websites, name_attr='url',
-        assistant_space_id=updated_assistant.space_id
+        old_assistant.websites,
+        updated_assistant.websites,
+        name_attr="url",
+        assistant_space_id=updated_assistant.space_id,
     )
     if websites_added or websites_removed:
         knowledge_changes["websites"] = {}
@@ -397,8 +560,11 @@ async def update_assistant(
 
     # Attachments
     attachments_added, attachments_removed = get_changes_for_list(
-        old_assistant.attachments, updated_assistant.attachments, name_attr='name', is_attachment=True,
-        assistant_space_id=updated_assistant.space_id
+        old_assistant.attachments,
+        updated_assistant.attachments,
+        name_attr="name",
+        is_attachment=True,
+        assistant_space_id=updated_assistant.space_id,
     )
     if attachments_added or attachments_removed:
         knowledge_changes["attachments"] = {}
@@ -409,8 +575,9 @@ async def update_assistant(
 
     # Integration Knowledge
     integrations_added, integrations_removed = get_changes_for_list(
-        old_assistant.integration_knowledge_list, updated_assistant.integration_knowledge_list,
-        assistant_space_id=updated_assistant.space_id
+        old_assistant.integration_knowledge_list,
+        updated_assistant.integration_knowledge_list,
+        assistant_space_id=updated_assistant.space_id,
     )
     if integrations_added or integrations_removed:
         knowledge_changes["integrations"] = {}
@@ -424,8 +591,9 @@ async def update_assistant(
 
     # MCP Servers
     mcp_servers_added, mcp_servers_removed = get_changes_for_list(
-        old_assistant.mcp_servers, updated_assistant.mcp_servers,
-        assistant_space_id=updated_assistant.space_id
+        old_assistant.mcp_servers,
+        updated_assistant.mcp_servers,
+        assistant_space_id=updated_assistant.space_id,
     )
     if mcp_servers_added or mcp_servers_removed:
         changes["mcp_servers"] = {}
@@ -438,20 +606,22 @@ async def update_assistant(
     if assistant.mcp_tools is not None and old_mcp_tool_overrides is not None:
         new_tool_map = {str(t.tool_id): t.is_enabled for t in assistant.mcp_tools}
 
-        tool_changes = []
+        tool_changes: list[dict[str, object]] = []
         for tid, is_enabled in new_tool_map.items():
             old_enabled = old_mcp_tool_overrides.get(tid)
             if old_enabled != is_enabled:
-                tool_changes.append({
-                    "tool_id": tid,
-                    "old_enabled": old_enabled,
-                    "new_enabled": is_enabled,
-                })
+                tool_changes.append(
+                    {
+                        "tool_id": tid,
+                        "old_enabled": old_enabled,
+                        "new_enabled": is_enabled,
+                    }
+                )
         if tool_changes:
             changes["mcp_tools"] = tool_changes
 
     # Create summary of changes
-    change_summary = []
+    change_summary: list[str] = []
     if "name" in changes:
         change_summary.append("name")
     if "prompt" in changes:
@@ -485,13 +655,15 @@ async def update_assistant(
     # Build extra context
     extra = {
         "type": updated_assistant.type.value if updated_assistant.type else "standard",
-        "summary": f"Modified {', '.join(change_summary)}" if change_summary else "No changes detected",
+        "summary": f"Modified {', '.join(change_summary)}"
+        if change_summary
+        else "No changes detected",
     }
 
     audit_service = container.audit_service()
     await audit_service.log_async(
         tenant_id=current_user.tenant_id,
-        actor_id=current_user.id,
+        user=current_user,
         action=ActionType.ASSISTANT_UPDATED,
         entity_type=EntityType.ASSISTANT,
         entity_id=id,
@@ -511,11 +683,12 @@ async def update_assistant(
 @router.delete(
     "/{id}/",
     status_code=204,
+    description="Delete an assistant.",
     responses=responses.get_responses([403, 404]),
 )
 async def delete_assistant(
     id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     service = container.assistant_service()
     current_user = container.user()
@@ -540,25 +713,37 @@ async def delete_assistant(
         "type": assistant.type.value if assistant.type else "standard",
         "impact": {
             "knowledge_sources": {
-                "collections": len(assistant.collections) if assistant.collections else 0,
+                "collections": len(assistant.collections)
+                if assistant.collections
+                else 0,
                 "websites": len(assistant.websites) if assistant.websites else 0,
-                "integrations": len(assistant.integration_knowledge_list) if assistant.integration_knowledge_list else 0,
+                "integrations": len(assistant.integration_knowledge_list)
+                if assistant.integration_knowledge_list
+                else 0,
             },
             "configuration": {
-                "model": assistant.completion_model.nickname if assistant.completion_model else None,
-                "temperature": assistant.completion_model_kwargs.temperature if assistant.completion_model_kwargs else None,
-                "top_p": assistant.completion_model_kwargs.top_p if assistant.completion_model_kwargs else None,
+                "model": assistant.completion_model.nickname
+                if assistant.completion_model
+                else None,
+                "temperature": assistant.completion_model_kwargs.temperature
+                if assistant.completion_model_kwargs
+                else None,
+                "top_p": assistant.completion_model_kwargs.top_p
+                if assistant.completion_model_kwargs
+                else None,
                 "data_retention_days": assistant.data_retention_days,
                 "published": assistant.published,
             },
-            "created_at": assistant.created_at.isoformat() if assistant.created_at else None,
+            "created_at": assistant.created_at.isoformat()
+            if assistant.created_at
+            else None,
         },
     }
 
     audit_service = container.audit_service()
     await audit_service.log_async(
         tenant_id=current_user.tenant_id,
-        actor_id=current_user.id,
+        user=current_user,
         action=ActionType.ASSISTANT_DELETED,
         entity_type=EntityType.ASSISTANT,
         entity_id=id,
@@ -575,20 +760,23 @@ async def delete_assistant(
 @router.post(
     "/{id}/sessions/",
     response_model=AskResponse,
-    responses=responses.streaming_response(AskResponse, [400, 404]),
+    description="Ask an assistant and start a new session. Streams the response as Server-Sent Events if `stream` is `true`.",
+    responses=responses.streaming_response(AskResponse, [400, 403, 404]),
 )
 async def ask_assistant(
     id: UUID,
     ask: AskAssistant,
-    version: int = Query(default=1, ge=1, le=2),
-    container: Container = Depends(get_container(with_user_from_assistant_api_key=True)),
-    db_session: AsyncSession = Depends(get_session_with_transaction),
+    container: Annotated[
+        Container,
+        Depends(get_container(with_user_from_assistant_api_key=True)),
+    ],
+    version: Annotated[int, Query(ge=1, le=2)] = 1,
 ):
     """Streams the response as Server-Sent Events if stream == true"""
     service = container.assistant_service()
     user = container.user()
 
-    file_ids = [file.id for file in ask.files]
+    file_ids = list(ask.files)
     tool_assistant_id = None
     if ask.tools is not None and ask.tools.assistants:
         tool_assistant_id = ask.tools.assistants[0].id
@@ -624,9 +812,11 @@ async def ask_assistant(
     }
 
     audit_service = container.audit_service()
+    actor_id, actor_type = audit_actor_for(user)
     await audit_service.log_async(
         tenant_id=user.tenant_id,
-        actor_id=user.id,
+        actor_id=actor_id,
+        actor_type=actor_type,
         action=ActionType.SESSION_STARTED,
         entity_type=EntityType.ASSISTANT,
         entity_id=id,
@@ -639,22 +829,21 @@ async def ask_assistant(
         ),
     )
 
-    return await assistant_protocol.to_response(
-        response=response, db_session=db_session, stream=ask.stream
-    )
+    return await assistant_protocol.to_response(response=response, stream=ask.stream)
 
 
 @router.get(
     "/{id}/sessions/",
     response_model=CursorPaginatedResponse[SessionMetadataPublic],
-    responses=responses.get_responses([400, 404]),
+    responses=responses.get_responses([400, 403, 404]),
+    dependencies=[Depends(require_resource_permission_for_method("conversations"))],
 )
 async def get_assistant_sessions(
     id: UUID,
-    limit: int = Query(default=None, gt=0),
-    cursor: datetime = None,
+    container: Annotated[Container, Depends(get_container(with_user=True))],
+    limit: Annotated[int | None, Query(gt=0)] = None,
+    cursor: datetime | None = None,
     previous: bool = False,
-    container: Container = Depends(get_container(with_user=True)),
 ):
     assistant_service = container.assistant_service()
     session_service = container.session_service()
@@ -667,6 +856,7 @@ async def get_assistant_sessions(
         cursor=cursor,
         previous=previous,
     )
+
     return to_sessions_paginated_response(
         sessions=sessions,
         limit=limit,
@@ -679,38 +869,45 @@ async def get_assistant_sessions(
 @router.get(
     "/{id}/sessions/{session_id}/",
     response_model=SessionPublic,
-    responses=responses.get_responses([400, 404]),
+    responses=responses.get_responses([400, 403, 404]),
+    dependencies=[Depends(require_resource_permission_for_method("conversations"))],
 )
 async def get_assistant_session(
     id: UUID,
     session_id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
+    assistant_service = container.assistant_service()
     session_service = container.session_service()
-    session = await session_service.get_session_by_uuid(session_id, assistant_id=id)
 
+    await assistant_service.get_assistant(id)
+    session = await session_service.get_session_by_uuid(session_id, assistant_id=id)
     return to_session_public(session)
 
 
 @router.delete(
     "/{id}/sessions/{session_id}/",
     response_model=SessionPublic,
-    responses=responses.get_responses([400, 404]),
+    description="Delete a session belonging to an assistant.",
+    responses=responses.get_responses([400, 403, 404]),
+    dependencies=[Depends(require_resource_permission_for_method("conversations"))],
 )
 async def delete_assistant_session(
     id: UUID,
     session_id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     session_service = container.session_service()
     assistant_service = container.assistant_service()
     user = container.user()
 
-    # Delete session
-    session = await session_service.delete(session_id, assistant_id=id)
-
-    # Get assistant info for audit log
+    # Authorize before mutating the session. This also enforces personal_chat
+    # for sessions belonging to the personal space's default assistant.
     assistant, _ = await assistant_service.get_assistant(id)
+
+    session = await session_service.delete(session_id, assistant_id=id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
 
     # Get space for context
     space = None
@@ -727,9 +924,11 @@ async def delete_assistant_session(
     }
 
     audit_service = container.audit_service()
+    actor_id, actor_type = audit_actor_for(user)
     await audit_service.log_async(
         tenant_id=user.tenant_id,
-        actor_id=user.id,
+        actor_id=actor_id,
+        actor_type=actor_type,
         action=ActionType.SESSION_ENDED,
         entity_type=EntityType.ASSISTANT,
         entity_id=id,
@@ -748,20 +947,23 @@ async def delete_assistant_session(
 @router.post(
     "/{id}/sessions/{session_id}/",
     response_model=AskResponse,
-    responses=responses.streaming_response(AskResponse, [400, 404]),
+    description="Ask a follow-up question in an existing session. Streams the response as Server-Sent Events if `stream` is `true`.",
+    responses=responses.streaming_response(AskResponse, [400, 403, 404]),
 )
 async def ask_followup(
     id: UUID,
     session_id: UUID,
     ask: AskAssistant,
-    version: int = Query(default=1, ge=1, le=2),
-    container: Container = Depends(get_container(with_user_from_assistant_api_key=True)),
-    db_session: AsyncSession = Depends(get_session_with_transaction),
+    container: Annotated[
+        Container,
+        Depends(get_container(with_user_from_assistant_api_key=True)),
+    ],
+    version: Annotated[int, Query(ge=1, le=2)] = 1,
 ):
     """Streams the response as Server-Sent Events if stream == true"""
     service = container.assistant_service()
 
-    file_ids = [file.id for file in ask.files]
+    file_ids = list(ask.files)
     tool_assistant_id = None
     if ask.tools is not None and ask.tools.assistants:
         tool_assistant_id = ask.tools.assistants[0].id
@@ -775,23 +977,29 @@ async def ask_followup(
         version=version,
     )
 
-    return await assistant_protocol.to_response(
-        response=response, db_session=db_session, stream=ask.stream
-    )
+    return await assistant_protocol.to_response(response=response, stream=ask.stream)
 
 
 @router.post(
     "/{id}/sessions/{session_id}/feedback/",
     response_model=SessionPublic,
-    responses=responses.get_responses([400, 404]),
+    description="Leave feedback on a session.",
+    responses=responses.get_responses([400, 403, 404]),
+    dependencies=[Depends(require_resource_permission_for_method("conversations"))],
 )
 async def leave_feedback(
     id: UUID,
     session_id: UUID,
     feedback: SessionFeedback,
-    container: Container = Depends(get_container(with_user_from_assistant_api_key=True)),
+    container: Annotated[
+        Container,
+        Depends(get_container(with_user_from_assistant_api_key=True)),
+    ],
 ):
+    assistant_service = container.assistant_service()
     session_service = container.session_service()
+
+    await assistant_service.get_assistant(id)
     session = await session_service.leave_feedback(
         session_id=session_id, assistant_id=id, feedback=feedback
     )
@@ -799,15 +1007,55 @@ async def leave_feedback(
     return to_session_public(session)
 
 
-@router.get("/{id}/api-keys/", response_model=ApiKey)
+@router.get(
+    "/{id}/api-keys/",
+    response_model=ApiKey,
+    tags=["Legacy API Keys"],
+    summary="Generate legacy assistant API key",
+    deprecated=True,
+    description=(
+        "Legacy assistant API key endpoint. Use `/api/v1/api-keys` for scoped v2 keys."
+        " This returns a legacy assistant-scoped key."
+    ),
+    responses={
+        200: {
+            "description": "Legacy assistant API key created and returned once.",
+            "content": {
+                "application/json": {"example": _LEGACY_ASSISTANT_API_KEY_EXAMPLE}
+            },
+        },
+        410: {
+            "description": "Legacy endpoint disabled. Migrate to v2 endpoint.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "code": "deprecated_endpoint",
+                        "message": "Legacy assistant API key endpoint is disabled. Use /api/v1/api-keys.",
+                    }
+                }
+            },
+        },
+        **api_key_error_responses([401, 403]),
+    },
+)
 async def generate_read_only_assistant_key(
     id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
+    _user_identity_guard: None = Depends(require_user_identity),
 ):
     """Generates a read-only api key for this assistant.
 
     This api key can only be used on `POST /api/v1/assistants/{id}/sessions/`
     and `POST /api/v1/assistants/{id}/sessions/{session_id}/`."""
+    settings = get_settings()
+    if not settings.api_key_legacy_endpoints_enabled:
+        raise HTTPException(
+            status_code=410,
+            detail={
+                "code": "deprecated_endpoint",
+                "message": "Legacy assistant API key endpoint is disabled. Use /api/v1/api-keys.",
+            },
+        )
     service = container.assistant_service()
     user = container.user()
 
@@ -835,7 +1083,7 @@ async def generate_read_only_assistant_key(
     audit_service = container.audit_service()
     await audit_service.log_async(
         tenant_id=user.tenant_id,
-        actor_id=user.id,
+        user=user,
         action=ActionType.API_KEY_GENERATED,
         entity_type=EntityType.API_KEY,
         entity_id=id,  # Use assistant ID as entity ID for assistant API keys
@@ -851,11 +1099,16 @@ async def generate_read_only_assistant_key(
     return api_key
 
 
-@router.post("/{id}/transfer/", status_code=204)
+@router.post(
+    "/{id}/transfer/",
+    status_code=204,
+    description="Transfer an assistant to another space.",
+    responses=responses.get_responses([403, 404]),
+)
 async def transfer_assistant_to_space(
     id: UUID,
     transfer_req: TransferApplicationRequest,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     # Get assistant info BEFORE transfer to capture source space
     user = container.user()
@@ -890,7 +1143,9 @@ async def transfer_assistant_to_space(
     # Build extra context for transfer (captures both source and target for incident investigation)
     extra = {
         "transfer": {
-            "source_space_id": str(assistant_before.space_id) if assistant_before.space_id else None,
+            "source_space_id": str(assistant_before.space_id)
+            if assistant_before.space_id
+            else None,
             "source_space_name": source_space.name if source_space else None,
             "target_space_id": str(transfer_req.target_space_id),
             "target_space_name": target_space.name if target_space else None,
@@ -901,7 +1156,7 @@ async def transfer_assistant_to_space(
     audit_service = container.audit_service()
     await audit_service.log_async(
         tenant_id=user.tenant_id,
-        actor_id=user.id,
+        user=user,
         action=ActionType.ASSISTANT_TRANSFERRED,
         entity_type=EntityType.ASSISTANT,
         entity_id=id,
@@ -918,9 +1173,13 @@ async def transfer_assistant_to_space(
 @router.get(
     "/{id}/prompts/",
     response_model=PaginatedResponse[PromptSparse],
+    description="List the prompt history for an assistant.",
+    responses=responses.get_responses([404]),
     include_in_schema=get_settings().dev,
 )
-async def get_prompts(id: UUID, container: Container = Depends(get_container(with_user=True))):
+async def get_prompts(
+    id: UUID, container: Annotated[Container, Depends(get_container(with_user=True))]
+):
     service = container.assistant_service()
     assembler = container.prompt_assembler()
 
@@ -933,19 +1192,22 @@ async def get_prompts(id: UUID, container: Container = Depends(get_container(wit
 @router.post(
     "/{id}/publish/",
     response_model=AssistantPublic,
+    description="Publish or unpublish an assistant.",
     responses=responses.get_responses([403, 404]),
 )
 async def publish_assistant(
     id: UUID,
     published: bool,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     service = container.assistant_service()
     assembler = container.assistant_assembler()
     user = container.user()
 
     # Publish/unpublish assistant
-    assistant, permissions = await service.publish_assistant(assistant_id=id, publish=published)
+    assistant, permissions = await service.publish_assistant(
+        assistant_id=id, publish=published
+    )
 
     # Get space for context
     space = None
@@ -965,7 +1227,7 @@ async def publish_assistant(
     audit_service = container.audit_service()
     await audit_service.log_async(
         tenant_id=user.tenant_id,
-        actor_id=user.id,
+        user=user,
         action=ActionType.ASSISTANT_PUBLISHED,
         entity_type=EntityType.ASSISTANT,
         entity_id=id,
@@ -978,21 +1240,39 @@ async def publish_assistant(
         ),
     )
 
-    return assembler.from_assistant_to_model(assistant=assistant, permissions=permissions)
+    if published:
+        try:
+            session = cast(AsyncSession, container.session())
+            await auto_follow_on_publish(
+                session=session,
+                user=user,
+                target_type=ApiKeyNotificationTargetType.ASSISTANT,
+                target_id=id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to auto-follow API key expiry notifications for published assistant %s",
+                id,
+            )
+
+    return assembler.from_assistant_to_model(
+        assistant=assistant, permissions=permissions
+    )
 
 
 @router.get(
     "/{id}/mcp-servers/",
-    responses=responses.get_responses([404]),
+    response_model=None,
+    description="Get all MCP servers associated with an assistant.",
+    responses=responses.get_responses([403, 404]),
 )
 async def get_assistant_mcp_servers(
     id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     """Get all MCP servers associated with an assistant."""
     service = container.assistant_service()
     mcp_servers = await service.get_assistant_mcp_servers(id)
-
 
     # Return as list of AssistantMCPServerPublic
     return {
@@ -1011,12 +1291,14 @@ async def get_assistant_mcp_servers(
 
 @router.post(
     "/{id}/mcp-servers/{mcp_server_id}/",
-    responses=responses.get_responses([400, 404]),
+    response_model=None,
+    description="Add an MCP server to an assistant.",
+    responses=responses.get_responses([400, 403, 404]),
 )
 async def add_mcp_to_assistant(
     id: UUID,
     mcp_server_id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     """Add an MCP server to an assistant."""
     service = container.assistant_service()
@@ -1032,7 +1314,7 @@ async def add_mcp_to_assistant(
     mcp_server = await mcp_server_service.get_mcp_server(mcp_server_id)
     await audit_service.log_async(
         tenant_id=user.tenant_id,
-        actor_id=user.id,
+        user=user,
         action=ActionType.ASSISTANT_UPDATED,
         entity_type=EntityType.ASSISTANT,
         entity_id=id,
@@ -1040,7 +1322,11 @@ async def add_mcp_to_assistant(
         metadata=AuditMetadata.standard(
             actor=user,
             target=assistant,
-            changes={"mcp_servers": {"added": [{"id": str(mcp_server.id), "name": mcp_server.name}]}},
+            changes={
+                "mcp_servers": {
+                    "added": [{"id": str(mcp_server.id), "name": mcp_server.name}]
+                }
+            },
         ),
     )
 
@@ -1050,12 +1336,13 @@ async def add_mcp_to_assistant(
 @router.delete(
     "/{id}/mcp-servers/{mcp_server_id}/",
     status_code=204,
-    responses=responses.get_responses([404]),
+    description="Remove an MCP server from an assistant.",
+    responses=responses.get_responses([403, 404]),
 )
 async def remove_mcp_from_assistant(
     id: UUID,
     mcp_server_id: UUID,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     """Remove an MCP server from an assistant."""
     service = container.assistant_service()
@@ -1075,7 +1362,7 @@ async def remove_mcp_from_assistant(
     audit_service = container.audit_service()
     await audit_service.log_async(
         tenant_id=user.tenant_id,
-        actor_id=user.id,
+        user=user,
         action=ActionType.ASSISTANT_UPDATED,
         entity_type=EntityType.ASSISTANT,
         entity_id=id,
@@ -1083,6 +1370,10 @@ async def remove_mcp_from_assistant(
         metadata=AuditMetadata.standard(
             actor=user,
             target=assistant,
-            changes={"mcp_servers": {"removed": [{"id": str(mcp_server.id), "name": mcp_server.name}]}},
+            changes={
+                "mcp_servers": {
+                    "removed": [{"id": str(mcp_server.id), "name": mcp_server.name}]
+                }
+            },
         ),
     )

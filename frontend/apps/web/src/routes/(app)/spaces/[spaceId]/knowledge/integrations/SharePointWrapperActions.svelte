@@ -7,6 +7,7 @@
   import { IconEllipsis } from "@intric/icons/ellipsis";
   import { IconTrash } from "@intric/icons/trash";
   import { Button, Dialog, Dropdown, Input } from "@intric/ui";
+  import { untrack } from "svelte";
 
   interface Props {
     wrapperId: string;
@@ -24,12 +25,12 @@
     state: { currentSpace }
   } = getSpacesManager();
 
-  let isRenaming = false;
-  let isDeleting = false;
-  let newWrapperName = wrapperName;
+  let isRenaming = $state(false);
+  let isDeleting = $state(false);
+  let newWrapperName = $state(untrack(() => wrapperName));
 
-  let showRenameDialog: Dialog.OpenState;
-  let showDeleteDialog: Dialog.OpenState;
+  let showRenameDialog = $state<Dialog.OpenState>();
+  let showDeleteDialog = $state<Dialog.OpenState>();
 
   async function renameWrapper() {
     const nextName = newWrapperName.trim();
@@ -84,11 +85,7 @@
     </Dropdown.Trigger>
     <Dropdown.Menu let:item>
       {#if canEdit}
-        <Button
-          is={item}
-          on:click={openRenameDialog}
-          padding="icon-leading"
-        >
+        <Button is={item} on:click={openRenameDialog} padding="icon-leading">
           <IconEdit size="sm" />{m.rename_wrapper()}
         </Button>
       {/if}
@@ -112,7 +109,11 @@
   <Dialog.Content width="small">
     <Dialog.Title>{m.rename_wrapper()}</Dialog.Title>
     <Dialog.Section scrollable={false}>
-      <Input.Text bind:value={newWrapperName} label={m.sharepoint_wrapper_name_label()} class="px-4 py-4" />
+      <Input.Text
+        bind:value={newWrapperName}
+        label={m.sharepoint_wrapper_name_label()}
+        class="px-4 py-4"
+      />
     </Dialog.Section>
     <Dialog.Controls let:close>
       <Button is={close}>{m.cancel()}</Button>

@@ -17,6 +17,7 @@
   import { createAsyncState } from "$lib/core/helpers/createAsyncState.svelte";
   import { m } from "$lib/paraglide/messages";
   import { toastError } from "$lib/core/errors";
+  import { untrack } from "svelte";
 
   type GroupMember = Space["group_members"]["items"][number];
   type RoleOption = { label: string; value: SpaceRole["value"] };
@@ -33,7 +34,7 @@
     refreshCurrentSpace
   } = getSpacesManager();
 
-  const options: RoleOption[] = $currentSpace.available_roles.filter(role => role.value !== "owner");
+  const options: RoleOption[] = $currentSpace.available_roles;
 
   const {
     elements: { trigger, menu, option, label },
@@ -45,7 +46,7 @@
       fitViewport: true,
       sameWidth: false
     },
-    defaultSelected: { value: groupMember.role }
+    defaultSelected: untrack(() => ({ value: groupMember.role }))
   });
 
   // After changing the role we update with the passed prop as source of truth
@@ -148,7 +149,9 @@
 <Dialog.Root alert bind:isOpen={showRemoveDialog}>
   <Dialog.Content width="small">
     <Dialog.Title>{m.remove_group()}</Dialog.Title>
-    <Dialog.Description>{m.confirm_remove_group({ groupName: groupMember.name })}</Dialog.Description>
+    <Dialog.Description
+      >{m.confirm_remove_group({ groupName: groupMember.name })}</Dialog.Description
+    >
     <Dialog.Controls let:close>
       <Button is={close}>{m.cancel()}</Button>
       <Button variant="destructive" on:click={removeGroupMember}

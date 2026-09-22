@@ -11,21 +11,25 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     computed_field,
     field_validator,
 )
+from typing_extensions import TypedDict
 
 from intric.ai_models.completion_models.completion_model import (
-    CompletionModel,
+    Completion,
+    CompletionModelPublic,
     CompletionModelSparse,
     ModelKwargs,
 )
 from intric.ai_models.embedding_models.embedding_model import EmbeddingModelLegacy
 from intric.collections.presentation.collection_models import CollectionPublic
+from intric.completion_models.domain.completion_model import CompletionModel
 from intric.completion_models.infrastructure.web_search import WebSearchResult
 from intric.files.file_models import File, FilePublic, FileRestrictions
 from intric.groups_legacy.api.group_models import GroupInDBBase
-from intric.info_blobs.info_blob import InfoBlobInDBNoText
+from intric.info_blobs.info_blob import InfoBlobInDBWithScore
 from intric.integration.presentation.models import IntegrationKnowledgePublic
 from intric.main.models import (
     NOT_PROVIDED,
@@ -63,7 +67,6 @@ class ModelInfo(BaseModel):
         return self.max_input_tokens
 
 
-
 # Relationship models
 class GroupWithEmbeddingModel(GroupInDBBase):
     embedding_model: Optional[EmbeddingModelLegacy] = None
@@ -76,63 +79,99 @@ class AssistantGuard(BaseModel):
     on_fail_message: str = "Jag kan tyvärr inte svara på det. Fråga gärna något annat!"
 
 
+class MCPServerPublicDict(TypedDict):
+    id: str
+    name: str
+    description: str | None
+    http_url: str | None
+    http_auth_type: str | None
+    tags: list[str] | None
+    icon_url: str | None
+    security_classification: dict[str, object] | None
+    tools: list[dict[str, object]]
+
+
+def _empty_uuid_list() -> list[UUID]:
+    return []
+
+
+def _empty_mcp_server_public_dict_list() -> list[MCPServerPublicDict]:
+    return []
+
+
+def _empty_mcp_tool_setting_list() -> list[MCPToolSetting]:
+    return []
+
+
 class AssistantBase(BaseModel):
     name: str
-    completion_model_kwargs: ModelKwargs = Field(default_factory=ModelKwargs)
-    logging_enabled: bool = False
+    completion_model_kwargs: ModelKwargs | None = Field(default_factory=ModelKwargs)
+    logging_enabled: bool | None = False
 
     @field_validator("completion_model_kwargs", mode="before")
     @classmethod
-    def set_model_kwargs(cls, model_kwargs):
-        return model_kwargs or ModelKwargs()
+    def set_model_kwargs(cls, model_kwargs: ModelKwargs | None):
+        # `default_factory` does not fire for explicit None; coerce here so
+        # legacy NULL JSONB rows load. `is None` (not truthiness) so a
+        # corrupt non-None value still raises ValidationError.
+        if model_kwargs is None:
+            return ModelKwargs()
+        return model_kwargs
 
 
+_DEPRECATED_DESCRIPTION = "This field is deprecated and will be ignored"
+_DEPRECATED_JSON_SCHEMA: dict[str, JsonValue] = {"deprecated": True}
+
+
+# Pydantic v2 emits UnsupportedFieldAttributeWarning when `deprecated=True` is
+# attached to a `Field()` on a Union (incl. Optional). Routing the flag through
+# `json_schema_extra` keeps the OpenAPI spec marking the field deprecated.
 class AssistantCreatePublic(AssistantBase):
     space_id: UUID
     prompt: Optional[PromptCreate] = Field(
         default=None,
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
     groups: list[ModelId] = Field(
-        default=[],
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        default_factory=lambda: list[ModelId](),
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
     websites: list[ModelId] = Field(
-        default=[],
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        default_factory=lambda: list[ModelId](),
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
     integration_knowledge_list: list[ModelId] = Field(
-        default=[],
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        default_factory=lambda: list[ModelId](),
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
     mcp_servers: list[ModelId] = Field(
-        default=[],
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        default_factory=lambda: list[ModelId](),
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
     guardrail: Optional[AssistantGuard] = Field(
         default=None,
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
     completion_model: Optional[ModelId] = Field(
         default=None,
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
     logging_enabled: Optional[bool] = Field(
         default=None,
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
     completion_model_kwargs: Optional[ModelKwargs] = Field(
         default=None,
-        deprecated=True,
-        description="This field is deprecated and will be ignored",
+        description=_DEPRECATED_DESCRIPTION,
+        json_schema_extra=_DEPRECATED_JSON_SCHEMA,
     )
 
 
@@ -140,14 +179,18 @@ class AssistantCreatePublic(AssistantBase):
 class AssistantUpdatePublic(AssistantCreatePublic):
     prompt: Optional[PromptCreate] = None
     attachments: Optional[list[ModelId]] = None
+    groups: Optional[list[ModelId]] = None  # type: ignore[assignment]
+    websites: Optional[list[ModelId]] = None  # type: ignore[assignment]
+    integration_knowledge_list: Optional[list[ModelId]] = None  # type: ignore[assignment]
+    mcp_servers: Optional[list[ModelId]] = None  # type: ignore[assignment]
     mcp_tools: Optional[list[MCPToolSetting]] = None
-    description: Optional[str] = Field(
+    description: Optional[str] = Field(  # type: ignore[assignment]  # NOT_PROVIDED sentinel default
         default=NOT_PROVIDED,
         description=(
             "A description of the assitant that will be used as "
             "default description in GroupChatAssistantPublic"
         ),
-        example="This is a helpful AI assistant",
+        json_schema_extra={"example": "This is a helpful AI assistant"},
     )
     insight_enabled: Optional[bool] = Field(
         default=None,
@@ -157,7 +200,7 @@ class AssistantUpdatePublic(AssistantCreatePublic):
         ),
     )
     data_retention_days: Optional[int] = None
-    metadata_json: Optional[dict] = Field(
+    metadata_json: Union[dict[str, object], None, NotProvided] = Field(
         default=NOT_PROVIDED,
         description="Metadata for the assistant",
     )
@@ -171,8 +214,8 @@ class AssistantCreate(AssistantBase):
     prompt: Optional[PromptCreate] = None
     space_id: UUID
     user_id: UUID
-    groups: list[ModelId] = []
-    websites: list[ModelId] = []
+    groups: list[UUID] = Field(default_factory=_empty_uuid_list)
+    websites: list[UUID] = Field(default_factory=_empty_uuid_list)
     guardrail_active: Optional[bool] = None
     completion_model_id: UUID = Field(
         validation_alias=AliasChoices(
@@ -190,14 +233,14 @@ class AssistantPublicBase(InDB):
     name: str
     prompt: PromptCreate
     completion_model_kwargs: Optional[ModelKwargs] = None
-    logging_enabled: bool
+    logging_enabled: bool | None
     space_id: Optional[UUID] = None
 
 
 class AskAssistant(BaseModel):
     question: str
     session_id: Optional[UUID] = None  # Add optional session_id field
-    files: list[ModelId] = Field(default=[])
+    files: list[UUID] = Field(default_factory=_empty_uuid_list)
     stream: bool = False
     tools: Optional[UseTools] = None
 
@@ -209,9 +252,9 @@ class AssistantResponse(BaseModel):
     question: str
     question_id: Optional[UUID] = None
     files: list[File]
-    answer: str | AsyncIterable[str]
-    info_blobs: list[InfoBlobInDBNoText]
-    completion_model: CompletionModel
+    answer: str | AsyncIterable[Completion]
+    info_blobs: list[InfoBlobInDBWithScore]
+    completion_model: CompletionModel | CompletionModelPublic
     tools: UseTools
     web_search_results: list[WebSearchResult]
 
@@ -223,7 +266,7 @@ class AssistantSparse(ResourcePermissionsMixin, AssistantBase, InDB):
     user_id: UUID
     published: bool = False
     description: Optional[str] = None
-    metadata_json: Optional[dict] = Field(
+    metadata_json: Optional[dict[str, object]] = Field(
         default=None,
         description="Metadata for the assistant",
     )
@@ -243,15 +286,17 @@ class AssistantPublic(InDB, ResourcePermissionsMixin):
     prompt: Optional[PromptPublic] = None
     space_id: UUID
     completion_model_kwargs: ModelKwargs
-    logging_enabled: bool
+    logging_enabled: bool | None
     attachments: list[FilePublic]
     allowed_attachments: FileRestrictions
     groups: list[CollectionPublic]
     websites: list[WebsitePublic]
     integration_knowledge_list: list[IntegrationKnowledgePublic]
-    mcp_servers: list[dict]  # Will be populated by assembler
+    mcp_servers: list[MCPServerPublicDict] = Field(
+        default_factory=_empty_mcp_server_public_dict_list
+    )
     mcp_tools: list[MCPToolSetting] = Field(
-        default_factory=list
+        default_factory=_empty_mcp_tool_setting_list
     )  # Tool-level overrides
     completion_model: Optional[CompletionModelSparse] = None
     published: bool = False
@@ -265,7 +310,7 @@ class AssistantPublic(InDB, ResourcePermissionsMixin):
             "A description of the assitant that will be used "
             "as default description in GroupChatAssistantPublic"
         ),
-        example="This is a helpful AI assistant",
+        json_schema_extra={"example": "This is a helpful AI assistant"},
     )
     icon_id: Optional[UUID] = Field(
         default=None,
@@ -281,9 +326,19 @@ class AssistantPublic(InDB, ResourcePermissionsMixin):
         default=None,
         description="Number of days to retain data for this assistant",
     )
-    metadata_json: Optional[dict] = Field(
+    metadata_json: Optional[dict[str, object]] = Field(
         default=None,
         description="Metadata for the assistant",
+    )
+    is_help_assistant: bool = Field(
+        default=False,
+        description=(
+            "True when this assistant currently fills a Help Assistant role "
+            "(it has an active row in org_space_assistant_roles). Help "
+            "assistants have logging permanently disabled; the edit UI uses "
+            "this flag to surface that explanation. Only the single-assistant "
+            "GET endpoint computes it; other responses default to False."
+        ),
     )
 
 

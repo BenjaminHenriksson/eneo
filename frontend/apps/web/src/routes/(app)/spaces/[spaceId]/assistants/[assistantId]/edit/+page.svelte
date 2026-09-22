@@ -3,6 +3,7 @@
   import { getSpacesManager } from "$lib/features/spaces/SpacesManager.js";
 
   import { Button, Input, Tooltip } from "@intric/ui";
+  import { IconSparkles } from "@intric/icons/sparkles";
   import { afterNavigate, beforeNavigate } from "$app/navigation";
 
   import { initAssistantEditor } from "$lib/features/assistants/AssistantEditor.js";
@@ -12,19 +13,33 @@
   import SelectAIModelV2 from "$lib/features/ai-models/components/SelectAIModelV2.svelte";
   import SelectBehaviourV2 from "$lib/features/ai-models/components/SelectBehaviourV2.svelte";
   import SelectModelSpecificSettings from "$lib/features/ai-models/components/SelectModelSpecificSettings.svelte";
-  import SelectKnowledgeV2 from "$lib/features/knowledge/components/SelectKnowledgeV2.svelte";
+  import SelectKnowledge from "$lib/features/knowledge/components/select/SelectKnowledge.svelte";
   import SelectMCPServers from "$lib/features/mcp/components/SelectMCPServers.svelte";
   import PromptVersionDialog from "$lib/features/prompts/components/PromptVersionDialog.svelte";
+  import PromptGuideModal from "$lib/features/prompt-guide/components/PromptGuideModal.svelte";
   import dayjs from "dayjs";
   import PublishingSetting from "$lib/features/publishing/components/PublishingSetting.svelte";
   import { page } from "$app/state";
   import { getChatQueryParams } from "$lib/features/chat/getChatQueryParams.js";
-  import { supportsTemperature } from "$lib/features/ai-models/supportsTemperature.js";
+  import {
+    filterSupportedModelKwargs,
+    hasModelSpecificSettings
+  } from "$lib/features/ai-models/ModelKwargCapabilities";
   import { m } from "$lib/paraglide/messages";
   import RetentionPolicyInput from "$lib/components/settings/RetentionPolicyInput.svelte";
   import IconUpload from "$lib/features/icons/IconUpload.svelte";
+  import ApiKeysSettingsSection from "$lib/features/api-keys/ApiKeysSettingsSection.svelte";
+  import { untrack } from "svelte";
 
   let { data } = $props();
+
+  // Help assistants have logging permanently disabled (PRD §6); surface the
+  // explanation in the security section on their edit page. `is_help_assistant`
+  // is computed by the single-assistant GET endpoint and is not yet part of the
+  // generated OpenAPI schema, hence the local cast.
+  const isHelpAssistant = $derived(
+    (data.assistant as { is_help_assistant?: boolean }).is_help_assistant ?? false
+  );
 
   const {
     state: { currentSpace },
@@ -35,18 +50,20 @@
     state: { resource, update, currentChanges, isSaving },
     saveChanges,
     discardChanges
-  } = initAssistantEditor({
-    assistant: data.assistant,
-    intric: data.intric,
-    onUpdateDone() {
-      refreshCurrentSpace("applications");
-    }
-  });
+  } = untrack(() =>
+    initAssistantEditor({
+      assistant: data.assistant,
+      intric: data.intric,
+      onUpdateDone() {
+        refreshCurrentSpace("applications");
+      }
+    })
+  );
 
-  let cancelUploadsAndClearQueue: () => void;
+  let cancelUploadsAndClearQueue = $state<() => void>(() => {});
 
   // Icon state
-  let currentIconId = $state<string | null>($resource.icon_id);
+  let currentIconId = $state<string | null>($resource.icon_id ?? null);
   let iconUploading = $state(false);
   let iconError = $state<string | null>(null);
 
@@ -94,27 +111,48 @@
     }
   }
 
-  // Behavior-specific change detection for models with model-specific parameters
   let hasBehaviorChanges = $derived.by(() => {
     if (!$currentChanges.diff.completion_model_kwargs) return false;
 
-    // For reasoning models or LiteLLM models, only show behavior changes if behavior-relevant fields changed
-    const hasModelSpecificParams =
-      $update.completion_model?.reasoning || $update.completion_model?.litellm_model_name;
-    if (hasModelSpecificParams) {
+    if (hasModelSpecificSettings($update.completion_model)) {
       const original = $resource.completion_model_kwargs || {};
       const updated = $update.completion_model_kwargs || {};
 
-      // Only check temperature and top_p for behavior changes
-      const behaviorFieldsChanged =
-        original.temperature !== updated.temperature || original.top_p !== updated.top_p;
-
-      return behaviorFieldsChanged;
+      return original.temperature !== updated.temperature;
     }
 
     // For regular models, show changes if any kwargs changed
     return true;
   });
+
+  // Prompt Guide (help-assistants): an availability-gated toolbar action.
+  // The availability endpoint is the single source of truth for whether the
+  // helper is usable here (role assigned + enabled + visible + a usable
+  // completion model + caller has EDIT on this assistant) and is prefetched
+  // in `+page.ts` so the button renders with its real state on first paint —
+  // same cadence as the History button next to it, with no post-mount flash.
+  // SvelteKit re-runs the load on navigation between assistants, so the
+  // value tracks `data.assistant.id` automatically.
+  let isModalOpen = $state(false);
+  // Bound to the modal's active run so the Apply handler can mark it completed.
+  let promptGuideRunId = $state<string | null>(null);
+  const promptGuideAvailability = $derived(data.promptGuideAvailability);
+
+  function promptGuideDisabledTooltip(reason: string | null | undefined): string {
+    switch (reason) {
+      case "role_disabled":
+        return m.prompt_guide_disabled_role_disabled();
+      case "role_not_visible":
+        return m.prompt_guide_disabled_role_not_visible();
+      case "no_completion_model":
+        return m.prompt_guide_disabled_no_completion_model();
+      case "no_edit_rights":
+        return m.prompt_guide_disabled_no_edit_rights();
+      case "no_assignment":
+      default:
+        return m.prompt_guide_disabled_no_assignment();
+    }
+  }
 
   beforeNavigate((navigate) => {
     if ($currentChanges.hasUnsavedChanges && !confirm(m.unsaved_changes_warning())) {
@@ -126,9 +164,14 @@
     discardChanges();
   });
 
-  let showSavesChangedNotice = false;
+  let showSavesChangedNotice = $state(false);
 
-  let previousRoute = `/spaces/${$currentSpace.routeId}/chat/?${getChatQueryParams({ chatPartner: data.assistant, tab: "chat" })}`;
+  let previousRoute = $state(
+    untrack(
+      () =>
+        `/spaces/${$currentSpace.routeId}/chat/?${getChatQueryParams({ chatPartner: data.assistant, tab: "chat" })}`
+    )
+  );
   afterNavigate(({ from }) => {
     if (page.url.searchParams.get("next") === "default") return;
     if (from) previousRoute = from.url.toString();
@@ -168,38 +211,10 @@
           on:click={async () => {
             cancelUploadsAndClearQueue();
 
-            // Clean up incompatible parameters when switching models
-            if ($update.completion_model_kwargs && $currentChanges.diff.completion_model) {
-              const cleanedKwargs = { ...$update.completion_model_kwargs };
-
-              // If model changed, reset to safe defaults for the new model
-              const newModel = $update.completion_model;
-              const originalModel = $resource.completion_model;
-
-              // Check if we switched between different model families/types
-              const modelChanged = newModel?.id !== originalModel?.id;
-
-              if (modelChanged) {
-                // Reset model-specific parameters that may not be compatible
-
-                // Remove reasoning_effort if new model doesn't support reasoning
-                if (!newModel?.reasoning) {
-                  delete cleanedKwargs.reasoning_effort;
-                }
-
-                // Remove verbosity if new model doesn't support it
-                const supportsVerbosity =
-                  newModel?.litellm_model_name || newModel?.name?.toLowerCase().includes("gpt-5");
-                if (!supportsVerbosity) {
-                  delete cleanedKwargs.verbosity;
-                }
-
-                // Note: Behavior parameter reset is now handled by SelectBehaviourV2 component
-                // when models are switched, so we don't need to reset them here during save
-              }
-
-              $update.completion_model_kwargs = cleanedKwargs;
-            }
+            $update.completion_model_kwargs = filterSupportedModelKwargs(
+              $update.completion_model_kwargs,
+              $update.completion_model
+            );
 
             await saveChanges();
             showSavesChangedNotice = true;
@@ -276,7 +291,24 @@
           fullWidth
           let:aria
         >
-          <div slot="toolbar" class="text-secondary">
+          <div slot="toolbar" class="text-secondary flex items-center gap-1">
+            {#if promptGuideAvailability}
+              <Tooltip
+                text={promptGuideAvailability.available
+                  ? m.prompt_guide_button_tooltip()
+                  : promptGuideDisabledTooltip(promptGuideAvailability.disabled_reason)}
+              >
+                <Button
+                  variant="simple"
+                  padding="icon-leading"
+                  disabled={!promptGuideAvailability.available}
+                  on:click={() => (isModalOpen = true)}
+                >
+                  <IconSparkles />
+                  {m.prompt_guide_button()}
+                </Button>
+              </Tooltip>
+            {/if}
             <PromptVersionDialog
               title={m.prompt_history_for({ name: $resource.name })}
               loadPromptVersionHistory={() => {
@@ -288,12 +320,38 @@
                 $update.prompt.description = `Restored prompt from ${restoredDate}`;
               }}
             ></PromptVersionDialog>
+            <PromptGuideModal
+              bind:open={isModalOpen}
+              bind:runId={promptGuideRunId}
+              targetType="assistant"
+              targetId={data.assistant.id}
+              targetPrompt={$update.prompt.text}
+              hasUnsavedPromptChanges={$currentChanges.diff.prompt !== undefined}
+              onApply={(text) => {
+                // Apply only mutates local editor state (PRD §10): the produced
+                // prompt is written into $update.prompt.text and persisted later
+                // through the normal Save button (intric.assistants.update),
+                // exactly like a manual edit. There is no parallel
+                // apply-and-save path here.
+                $update.prompt.text = text;
+                $update.prompt.description = m.prompt_guide_apply_description({
+                  date: dayjs().format("YYYY-MM-DD HH:mm")
+                });
+                isModalOpen = false;
+                // Mark the Q&A run completed — best-effort, must not block Apply.
+                if (promptGuideRunId) {
+                  data.intric.helpAssistants.runs
+                    .setStatus({ run_id: promptGuideRunId, status: "completed" })
+                    .catch(() => {});
+                }
+              }}
+            />
           </div>
           <textarea
             rows={4}
             {...aria}
             bind:value={$update.prompt.text}
-            on:change={() => {
+            onchange={() => {
               $update.prompt.description = "";
             }}
             class="border-default bg-primary ring-default min-h-24 rounded-lg border px-6 py-4 text-lg shadow focus-within:ring-2 hover:ring-2 focus-visible:ring-2"
@@ -316,7 +374,10 @@
         <!-- Knowledge and MCP are mutually exclusive. Only disable knowledge when MCP is active
              AND no knowledge exists. If both somehow exist (legacy data), allow editing both
              so the user can remove one to resolve the conflict. -->
-        {@const hasAnyKnowledge = ($update.groups?.length ?? 0) > 0 || ($update.websites?.length ?? 0) > 0 || ($update.integration_knowledge_list?.length ?? 0) > 0}
+        {@const hasAnyKnowledge =
+          ($update.groups?.length ?? 0) > 0 ||
+          ($update.websites?.length ?? 0) > 0 ||
+          ($update.integration_knowledge_list?.length ?? 0) > 0}
         {@const hasAnyMCP = ($update.mcp_servers?.length ?? 0) > 0}
         {@const knowledgeDisabledByMCP = hasAnyMCP && !hasAnyKnowledge}
         <Settings.Row
@@ -332,12 +393,15 @@
           }}
         >
           {#if knowledgeDisabledByMCP}
-            <p class="label-warning border-label-default bg-label-dimmer text-label-stronger mb-2 rounded-md border px-2 py-1 text-sm">
-              <span class="font-bold">{m.warning()}:&nbsp;</span>{m.knowledge_disabled_when_mcp_active()}
+            <p
+              class="label-warning border-label-default bg-label-dimmer text-label-stronger mb-2 rounded-md border px-2 py-1 text-sm"
+            >
+              <span class="font-bold">{m.warning()}:&nbsp;</span
+              >{m.knowledge_disabled_when_mcp_active()}
             </p>
           {/if}
-          <div class={knowledgeDisabledByMCP ? 'opacity-50 pointer-events-none' : ''}>
-            <SelectKnowledgeV2
+          <div class={knowledgeDisabledByMCP ? "pointer-events-none opacity-50" : ""}>
+            <SelectKnowledge
               originMode="personal"
               bind:selectedWebsites={$update.websites}
               bind:selectedCollections={$update.groups}
@@ -359,12 +423,15 @@
           }}
         >
           {#if knowledgeDisabledByMCP}
-            <p class="label-warning border-label-default bg-label-dimmer text-label-stronger mb-2 rounded-md border px-2 py-1 text-sm">
-              <span class="font-bold">{m.warning()}:&nbsp;</span>{m.knowledge_disabled_when_mcp_active()}
+            <p
+              class="label-warning border-label-default bg-label-dimmer text-label-stronger mb-2 rounded-md border px-2 py-1 text-sm"
+            >
+              <span class="font-bold">{m.warning()}:&nbsp;</span
+              >{m.knowledge_disabled_when_mcp_active()}
             </p>
           {/if}
-          <div class={knowledgeDisabledByMCP ? 'opacity-50 pointer-events-none' : ''}>
-            <SelectKnowledgeV2
+          <div class={knowledgeDisabledByMCP ? "pointer-events-none opacity-50" : ""}>
+            <SelectKnowledge
               originMode="organization"
               bind:selectedWebsites={$update.websites}
               bind:selectedCollections={$update.groups}
@@ -403,15 +470,15 @@
           <SelectBehaviourV2
             bind:kwArgs={$update.completion_model_kwargs}
             selectedModel={$update.completion_model}
-            isDisabled={!supportsTemperature($update.completion_model?.name)}
+            isDisabled={!$update.completion_model}
             {aria}
           ></SelectBehaviourV2>
         </Settings.Row>
 
-        {#if $update.completion_model?.reasoning || $update.completion_model?.litellm_model_name}
+        {#if hasModelSpecificSettings($update.completion_model)}
           <Settings.Row
-            title="Model settings"
-            description="Configure model-specific parameters for advanced control over the response."
+            title={m.model_settings()}
+            description={m.model_settings_description()}
             hasChanges={$currentChanges.diff.completion_model_kwargs !== undefined}
             revertFn={() => {
               discardChanges("completion_model_kwargs");
@@ -427,29 +494,48 @@
 
       <!-- Same mutual exclusivity logic as above: only disable MCP when knowledge
            is active AND no MCP exists. If both exist (legacy data), keep both editable. -->
-      {@const mcpDisabledByKnowledge = (($update.groups?.length ?? 0) > 0 || ($update.websites?.length ?? 0) > 0 || ($update.integration_knowledge_list?.length ?? 0) > 0) && ($update.mcp_servers?.length ?? 0) === 0}
+      {@const mcpDisabledByKnowledge =
+        (($update.groups?.length ?? 0) > 0 ||
+          ($update.websites?.length ?? 0) > 0 ||
+          ($update.integration_knowledge_list?.length ?? 0) > 0) &&
+        ($update.mcp_servers?.length ?? 0) === 0}
       <Settings.Group title={m.mcp_servers()}>
         <Settings.Row
           title={m.mcp_servers()}
           description={m.select_mcp_servers_description()}
-          hasChanges={$currentChanges.diff.mcp_servers !== undefined || $currentChanges.diff.mcp_tools !== undefined}
+          hasChanges={$currentChanges.diff.mcp_servers !== undefined ||
+            $currentChanges.diff.mcp_tools !== undefined}
           revertFn={() => {
             discardChanges("mcp_servers");
             discardChanges("mcp_tools");
           }}
         >
           {#if mcpDisabledByKnowledge}
-            <p class="label-warning border-label-default bg-label-dimmer text-label-stronger mb-2 rounded-md border px-2 py-1 text-sm">
-              <span class="font-bold">{m.warning()}:&nbsp;</span>{m.mcp_disabled_when_knowledge_active()}
+            <p
+              class="label-warning border-label-default bg-label-dimmer text-label-stronger mb-2 rounded-md border px-2 py-1 text-sm"
+            >
+              <span class="font-bold">{m.warning()}:&nbsp;</span
+              >{m.mcp_disabled_when_knowledge_active()}
             </p>
           {/if}
-          <div class={mcpDisabledByKnowledge ? 'opacity-50 pointer-events-none' : ''}>
-            <SelectMCPServers bind:selectedMCPServers={$update.mcp_servers} bind:selectedMCPTools={$update.mcp_tools} selectedModel={$update.completion_model} />
+          <div class={mcpDisabledByKnowledge ? "pointer-events-none opacity-50" : ""}>
+            <SelectMCPServers
+              bind:selectedMCPServers={$update.mcp_servers}
+              bind:selectedMCPTools={$update.mcp_tools}
+              selectedModel={$update.completion_model}
+            />
           </div>
-       </Settings.Row>
+        </Settings.Row>
       </Settings.Group>
 
       <Settings.Group title={m.security_and_privacy()}>
+        {#if isHelpAssistant}
+          <p
+            class="border-default bg-primary text-secondary mb-2 rounded-lg border px-3 py-2 text-sm"
+          >
+            {m.admin_help_assistants_edit_logging_explanation()}
+          </p>
+        {/if}
         <Settings.Row
           hasChanges={$currentChanges.diff.data_retention_days !== undefined}
           revertFn={() => {
@@ -460,6 +546,7 @@
           let:labelId
           let:descriptionId
         >
+          <!-- @ts-ignore data_retention_days nullability -->
           <RetentionPolicyInput
             bind:value={$update.data_retention_days}
             hasChanges={$currentChanges.diff.data_retention_days !== undefined}
@@ -470,6 +557,22 @@
           />
         </Settings.Row>
       </Settings.Group>
+
+      {#if data.assistant.permissions?.includes("edit")}
+        <Settings.Group title={m.api_access()}>
+          <Settings.Row
+            title={m.api_keys()}
+            description={m.api_keys_assistant_settings_desc()}
+            fullWidth
+          >
+            <ApiKeysSettingsSection
+              scopeType="assistant"
+              scopeId={data.assistant.id}
+              scopeName={$resource.name}
+            />
+          </Settings.Row>
+        </Settings.Group>
+      {/if}
 
       {#if data.assistant.permissions?.some((permission) => permission === "insight_toggle" || permission === "publish")}
         <Settings.Group title={m.publishing()}>

@@ -1,8 +1,12 @@
+from typing import Annotated, Optional
 from uuid import UUID
-from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
+# Audit logging - module level imports for consistency
+from intric.audit.application.audit_metadata import AuditMetadata
+from intric.audit.domain.action_types import ActionType
+from intric.audit.domain.entity_types import EntityType
 from intric.integration.presentation.models import (
     AuthCallbackParams,
     AuthUrlPublic,
@@ -10,11 +14,7 @@ from intric.integration.presentation.models import (
 )
 from intric.main.container.container import Container
 from intric.server.dependencies.container import get_container
-
-# Audit logging - module level imports for consistency
-from intric.audit.application.audit_metadata import AuditMetadata
-from intric.audit.domain.action_types import ActionType
-from intric.audit.domain.entity_types import EntityType
+from intric.server.protocol import responses
 
 router = APIRouter()
 
@@ -23,11 +23,13 @@ router = APIRouter()
     "/{tenant_integration_id}/url/",
     response_model=AuthUrlPublic,
     status_code=200,
+    description="Generate the OAuth2 authorization URL for a tenant integration.",
+    responses=responses.get_responses([400, 404]),
 )
 async def gen_url(
     tenant_integration_id: UUID,
-    state: Optional[str] = None,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
+    state: Annotated[Optional[str], Query()] = None,
 ):
     oauth2_service = container.oauth2_service()
 
@@ -36,10 +38,16 @@ async def gen_url(
     )
 
 
-@router.post("/callback/token/", status_code=200, response_model=UserIntegration)
+@router.post(
+    "/callback/token/",
+    status_code=200,
+    response_model=UserIntegration,
+    description="Complete the OAuth2 callback by exchanging the auth code for a user integration.",
+    responses=responses.get_responses([400, 404]),
+)
 async def on_auth_callback(
     params: AuthCallbackParams,
-    container: Container = Depends(get_container(with_user=True)),
+    container: Annotated[Container, Depends(get_container(with_user=True))],
 ):
     oauth2_service = container.oauth2_service()
     user = container.user()
@@ -55,7 +63,7 @@ async def on_auth_callback(
     audit_service = container.audit_service()
     await audit_service.log_async(
         tenant_id=user.tenant_id,
-        actor_id=user.id,
+        user=user,
         action=ActionType.INTEGRATION_CONNECTED,
         entity_type=EntityType.INTEGRATION,
         entity_id=integration.id,

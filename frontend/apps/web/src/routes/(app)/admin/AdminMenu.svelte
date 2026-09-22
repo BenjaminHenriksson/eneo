@@ -12,9 +12,10 @@
   import { IconCPU } from "@intric/icons/CPU";
   import { IconBulb } from "@intric/icons/bulb";
   import { IconHistory } from "@intric/icons/history";
+  import { IconSparkles } from "@intric/icons/sparkles";
   import { page } from "$app/stores";
   import { Navigation } from "$lib/components/layout";
-  import { ChartPie, LayoutTemplate, Cloud, Plug } from "lucide-svelte";
+  import { ChartPie, LayoutTemplate, Cloud, Plug, ShieldCheck } from "lucide-svelte";
   import { IconKey } from "@intric/icons/key";
   import { m } from "$lib/paraglide/messages";
   import { localizeHref } from "$lib/paraglide/runtime";
@@ -57,13 +58,25 @@
     />
   {/if}
   <Navigation.Link
+    href={localizeHref("/admin/help-assistants")}
+    isActive={isSelected("/admin/help-assistants", currentRoute)}
+    icon={IconSparkles}
+    label={m.admin_help_assistants_nav_label()}
+  />
+  <Navigation.Link
     href={localizeHref("/admin/security-classifications")}
     isActive={isSelected("/admin/security-classifications", currentRoute)}
-    icon={IconKey}
+    icon={ShieldCheck}
     label={m.security()}
   />
   <Navigation.Link
-    href="/admin/mcp-servers"
+    href={localizeHref("/admin/api-keys")}
+    isActive={isSelected("/admin/api-keys", currentRoute)}
+    icon={IconKey}
+    label={m.api_keys()}
+  />
+  <Navigation.Link
+    href={localizeHref("/admin/mcp-servers")}
     isActive={isSelected("/admin/mcp-servers", currentRoute)}
     icon={Plug}
     label={m.mcp()}

@@ -50,6 +50,17 @@ class ErrorCodes(int, Enum):
     MODEL_NOT_AVAILABLE = 9033
     KNOWLEDGE_MODEL_UNAVAILABLE = 9034
     SECURITY_CLASSIFICATION_MISMATCH = 9035
+    # MCP upstream errors
+    MCP_UPSTREAM_ERROR = 9036
+    MCP_UPSTREAM_AUTH_ERROR = 9037
+    # Resource readiness
+    RESOURCE_NOT_READY = 9038
+    # Model lifecycle — soft-delete blocked because the model is still
+    # referenced by an active resource (assistants, apps, services,
+    # assistant/app templates). Space membership alone does not block.
+    MODEL_IN_USE = 9039
+    # System user protection
+    SYSTEM_USER_PROTECTED = 9040
 
 
 class NotFoundException(Exception):
@@ -57,7 +68,16 @@ class NotFoundException(Exception):
 
 
 class UnauthorizedException(Exception):
-    pass
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        code: str = "forbidden",
+        context: dict[str, object] | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.context = context
 
 
 class UnsupportedModelException(Exception):
@@ -114,6 +134,18 @@ class BadRequestException(Exception):
     pass
 
 
+class ModelInUseException(Exception):
+    """Raised when trying to soft-delete a model that is still referenced.
+
+    Surfaced as 400 with a dedicated error code so the frontend can show a
+    localized "Model is in use" message and offer the migration flow as a
+    follow-up action — the generic BAD_REQUEST code can't carry that
+    context.
+    """
+
+    pass
+
+
 class QuotaExceededException(Exception):
     pass
 
@@ -123,7 +155,18 @@ class UniqueException(Exception):
 
 
 class OpenAIException(Exception):
-    pass
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        code: str | None = None,
+        context: dict[str, object] | None = None,
+        details: dict[str, object] | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.context = context
+        self.details = details
 
 
 class ClaudeException(Exception):
@@ -308,6 +351,18 @@ class APIKeyNotConfiguredException(Exception):
     pass
 
 
+class SystemUserProtected(Exception):
+    """Raised when an admin path tries to delete or mutate a system user.
+
+    Per-tenant system users (``users.is_system_user = true``) own seeded
+    Help Assistant rows; deleting them would cascade-destroy the org-space's
+    Prompt Guide and audit history. The marker is authoritative — no admin
+    path is allowed to remove it.
+    """
+
+    pass
+
+
 class ProviderInactiveException(Exception):
     """Raised when attempting to use a model whose provider is inactive/disabled."""
 
@@ -338,6 +393,18 @@ class SecurityClassificationMismatchException(Exception):
     pass
 
 
+class MCPClientError(Exception):
+    """Raised when an upstream MCP service fails."""
+
+    pass
+
+
+class MCPAuthenticationError(MCPClientError):
+    """Raised when upstream MCP authentication fails."""
+
+    pass
+
+
 # Map exceptions to response codes
 # Set message to None to use the internal message
 # Set error codes in the range 9000 - 9999
@@ -354,6 +421,11 @@ EXCEPTION_MAP = {
         ErrorCodes.USER_NOT_CREATED,
     ),
     BadRequestException: (400, None, ErrorCodes.BAD_REQUEST),
+    ModelInUseException: (
+        400,
+        "Model is currently in use and cannot be deleted.",
+        ErrorCodes.MODEL_IN_USE,
+    ),
     QuotaExceededException: (403, None, ErrorCodes.QUOTA_EXCEEDED),
     UniqueException: (400, None, ErrorCodes.UNIQUE_ERROR),
     OpenAIException: (503, None, ErrorCodes.OPENAI_ERROR),
@@ -395,10 +467,31 @@ EXCEPTION_MAP = {
     ProviderNotFoundException: (404, None, ErrorCodes.PROVIDER_NOT_FOUND),
     # Resource configuration errors - use None to pass through the exception's own message
     ModelNotAvailableException: (400, None, ErrorCodes.MODEL_NOT_AVAILABLE),
-    KnowledgeModelUnavailableException: (400, None, ErrorCodes.KNOWLEDGE_MODEL_UNAVAILABLE),
+    KnowledgeModelUnavailableException: (
+        400,
+        None,
+        ErrorCodes.KNOWLEDGE_MODEL_UNAVAILABLE,
+    ),
     SecurityClassificationMismatchException: (
         400,
         None,
         ErrorCodes.SECURITY_CLASSIFICATION_MISMATCH,
     ),
+    # MCP upstream errors
+    MCPClientError: (
+        502,
+        "MCP upstream service unavailable.",
+        ErrorCodes.MCP_UPSTREAM_ERROR,
+    ),
+    MCPAuthenticationError: (
+        502,
+        "MCP upstream authentication failed.",
+        ErrorCodes.MCP_UPSTREAM_AUTH_ERROR,
+    ),
+    NotReadyException: (
+        503,
+        "Resource is not ready yet.",
+        ErrorCodes.RESOURCE_NOT_READY,
+    ),
+    SystemUserProtected: (403, None, ErrorCodes.SYSTEM_USER_PROTECTED),
 }

@@ -7,16 +7,15 @@ from uuid import UUID, uuid4
 
 import jwt
 import pytest
-from httpx import AsyncClient
 import sqlalchemy as sa
-
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from httpx import AsyncClient
 
 from intric.authentication.auth_service import AuthService
-from intric.tenants.tenant_repo import TenantRepository
-from intric.database.tables.tenant_table import Tenants
 from intric.database.database import sessionmanager
+from intric.database.tables.tenant_table import Tenants
+from intric.tenants.tenant_repo import TenantRepository
 
 
 async def _patch_federation_config(async_session, tenant_id: UUID, new_config: dict):
@@ -24,7 +23,9 @@ async def _patch_federation_config(async_session, tenant_id: UUID, new_config: d
     async with sessionmanager.session() as session:
         async with session.begin():
             result = await session.execute(
-                sa.select(Tenants.__table__.c.federation_config).where(Tenants.__table__.c.id == tenant_id)
+                sa.select(Tenants.__table__.c.federation_config).where(
+                    Tenants.__table__.c.id == tenant_id
+                )
             )
             current = dict(result.scalar_one())
             config = {**current, **new_config}
@@ -129,10 +130,14 @@ def _generate_rs256_keypair() -> tuple[str, str]:
         encryption_algorithm=serialization.NoEncryption(),
     ).decode()
 
-    public_pem = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    ).decode()
+    public_pem = (
+        private_key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode()
+    )
 
     return private_pem, public_pem
 
@@ -183,7 +188,9 @@ async def test_patch_federation_updates_single_field_without_full_payload(
         headers={"X-API-Key": super_admin_token},
     )
     assert response.status_code == 200, response.text
-    assert response.json()["message"] == "Federation config for entra updated successfully"
+    assert (
+        response.json()["message"] == "Federation config for entra updated successfully"
+    )
 
     repo = TenantRepository(async_session)
     stored = (await repo.get(tenant_id)).federation_config
@@ -354,7 +361,9 @@ async def test_patch_federation_clears_optional_fields(
             "discovery_endpoint": discovery_endpoint,
             "canonical_public_origin": f"https://{slug}.eneo.test",
             "redirect_path": "/auth/callback",
-            "additional_redirect_uris": [f"https://extra.{slug}.eneo.test/auth/callback"],
+            "additional_redirect_uris": [
+                f"https://extra.{slug}.eneo.test/auth/callback"
+            ],
             "allowed_domains": [f"{slug}.example.com"],
         },
         headers={"X-API-Key": super_admin_token},
@@ -414,6 +423,26 @@ async def test_put_federation_still_requires_full_payload(
         headers={"X-API-Key": super_admin_token},
     )
     assert response.status_code == 422
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_patch_federation_rejects_null_required_field(
+    client: AsyncClient,
+    super_admin_token: str,
+    mock_transcription_models,
+):
+    slug = f"federation-null-{uuid4().hex[:6]}"
+    tenant = await _create_tenant(client, super_admin_token, slug)
+
+    response = await client.patch(
+        f"/api/v1/sysadmin/tenants/{tenant['id']}/federation",
+        json={"client_id": None},
+        headers={"X-API-Key": super_admin_token},
+    )
+
+    assert response.status_code == 422
+    assert "PATCH does not allow null for: client_id" in response.text
 
 
 @pytest.mark.integration
@@ -905,16 +934,26 @@ async def test_federation_callback_rejects_redirect_mismatch_without_grace(
         tenant_model = await repo.get(tenant_id)
         base_config = dict(tenant_model.federation_config)
         base_config.setdefault("redirect_path", "/auth/callback")
-        base_config.setdefault("issuer", base_config.get("issuer", f"https://idp.{slug}.local"))
+        base_config.setdefault(
+            "issuer", base_config.get("issuer", f"https://idp.{slug}.local")
+        )
         base_config.setdefault("authorization_endpoint", authorization_endpoint)
         base_config.setdefault("token_endpoint", token_endpoint)
         base_config.setdefault("jwks_uri", jwks_uri)
-        base_config.setdefault("client_id", base_config.get("client_id", f"client-{slug}"))
-        base_config.setdefault("client_secret", base_config.get("client_secret", "super-secret"))
+        base_config.setdefault(
+            "client_id", base_config.get("client_id", f"client-{slug}")
+        )
+        base_config.setdefault(
+            "client_secret", base_config.get("client_secret", "super-secret")
+        )
         base_config.setdefault("provider", base_config.get("provider", "entra"))
         base_config.setdefault("discovery_endpoint", discovery_endpoint)
-        base_config.setdefault("allowed_domains", base_config.get("allowed_domains", [f"{slug}.gov"]))
-        base_config.setdefault("scopes", base_config.get("scopes", ["openid", "email", "profile"]))
+        base_config.setdefault(
+            "allowed_domains", base_config.get("allowed_domains", [f"{slug}.gov"])
+        )
+        base_config.setdefault(
+            "scopes", base_config.get("scopes", ["openid", "email", "profile"])
+        )
 
         initial_config = base_config.copy()
         initial_config.update(

@@ -10,6 +10,7 @@
   import { derived, type Readable } from "svelte/store";
   import { page } from "$app/stores";
   import { goto } from "$app/navigation";
+  import { resolve } from "$app/paths";
   import { getSpacesManager } from "$lib/features/spaces/SpacesManager";
   import AppInput from "./AppInput.svelte";
   import { formatEmojiTitle } from "$lib/core/formatting/formatEmojiTitle";
@@ -71,7 +72,7 @@
       clearUploads();
       isSubmitting = false;
       // Forward to the newly created run
-      goto(`/spaces/${$currentSpace.routeId}/apps/${$app.id}/results/${result.id}`);
+      goto(resolve(`/spaces/${$currentSpace.routeId}/apps/${$app.id}/results/${result.id}`));
     } catch (err) {
       console.error(err);
       toastError(err);
@@ -96,7 +97,7 @@
     <div class="-mt-[2.5rem] flex flex-grow flex-col items-center justify-center rounded pb-2">
       <div class="bg-primary flex items-center gap-4 rounded-2xl pr-6 pl-4">
         <AppIcon app={$app} size="medium"></AppIcon>
-        <span class="text-2xl md:text-4xl font-extrabold">{formatEmojiTitle($app.name)}</span>
+        <span class="text-2xl font-extrabold md:text-4xl">{formatEmojiTitle($app.name)}</span>
       </div>
     </div>
 

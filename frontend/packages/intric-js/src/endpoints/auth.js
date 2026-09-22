@@ -9,7 +9,7 @@ export function initAuth(client) {
      */
     listTenants: async () => {
       return await client.fetch("/api/v1/auth/tenants", {
-        method: "GET"
+        method: "get"
       });
     },
 
@@ -22,7 +22,7 @@ export function initAuth(client) {
      */
     initiateAuth: async ({ tenant, state }) => {
       return await client.fetch("/api/v1/auth/initiate", {
-        method: "GET",
+        method: "get",
         params: {
           query: {
             tenant,
@@ -41,8 +41,10 @@ export function initAuth(client) {
      * @returns {Promise<import("../types/resources").AccessTokenResponse>}
      */
     handleAuthCallback: async ({ code, state, codeVerifier }) => {
-      return await client.fetch("/api/v1/auth/callback", {
-        method: "POST",
+      /** @type {import("../types/resources").AccessTokenResponse} */
+      // @ts-ignore - response type is unknown in schema
+      const res = await client.fetch("/api/v1/auth/callback", {
+        method: "post",
         requestBody: {
           "application/json": {
             code,
@@ -51,6 +53,7 @@ export function initAuth(client) {
           }
         }
       });
+      return res;
     }
   };
 }
